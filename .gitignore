@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+!.env.example
+private_data/
+*.eml
+*.msg
+token_cache*
+.DS_Store
+.vscode/

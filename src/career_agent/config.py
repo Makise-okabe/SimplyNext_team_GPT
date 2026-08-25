@@ -3,6 +3,6 @@ from pydantic import BaseModel
 
 class Settings(BaseModel):
     trusted_senders: set[str] = {
-        "nustalentconnect@csm.symplicity.com",
+        "zeli.goh@nus.edu.sg",
         "no-reply@kinobi.asia",
     }

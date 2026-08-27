@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import date, datetime
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -53,14 +54,12 @@ class CandidateChunk:
 
 
 def should_extract_signal(state: dict) -> bool:
-    """Return True only for the two career-email sources used in Prototype 1."""
     email = state.get("email") or {}
     sender = (email.get("sender_email") or "").strip().lower()
     return sender in Settings().trusted_senders
 
 
 def is_candidate_url(url: str) -> bool:
-    """Drop obvious navigation, social, mailbox and image URLs before LLM use."""
     try:
         parsed = urlparse(url)
     except ValueError:
@@ -74,13 +73,10 @@ def is_candidate_url(url: str) -> bool:
 
     if not host or host in NOISE_HOSTS:
         return False
-
     if path.endswith(ASSET_SUFFIXES):
         return False
-
     if "stripocdn.email" in host and "/images/" in path:
         return False
-
     if host.endswith("nus.edu.sg") and path in GENERIC_NUS_PATHS:
         return False
 
@@ -88,7 +84,6 @@ def is_candidate_url(url: str) -> bool:
 
 
 def _context_for_url(text: str, url: str, radius: int = MAX_CONTEXT_CHARS // 2) -> str:
-    """Return nearby email text for a URL, falling back to the email prefix."""
     if not text:
         return ""
 
@@ -102,7 +97,6 @@ def _context_for_url(text: str, url: str, radius: int = MAX_CONTEXT_CHARS // 2) 
 
 
 def build_candidate_chunks(text: str, urls: list[str]) -> list[CandidateChunk]:
-    """Create deduplicated candidate chunks from relevant URLs and nearby text."""
     seen: set[str] = set()
     candidates: list[CandidateChunk] = []
 
@@ -156,6 +150,7 @@ Rules:
 - Generic NUS navigation, social-media, image and mailbox links are not opportunities.
 - Multiple candidates may refer to one opportunity; avoid duplicate opportunities.
 - evidence_text must be a short verbatim-or-near-verbatim excerpt supporting the extraction.
+- deadline_hint may be natural language such as '13 September 2026'.
 
 Candidates:\n{_format_candidates(candidates)}
 """.strip()
@@ -164,15 +159,30 @@ Candidates:\n{_format_candidates(candidates)}
 
 
 def _source_name(email: dict) -> str:
-    return (
-        email.get("sender_name")
-        or email.get("sender_email")
-        or "NUS career email"
+    return email.get("sender_name") or email.get("sender_email") or "NUS career email"
+
+
+def _normalize_deadline(value: str | None) -> date | None:
+    if not value:
+        return None
+
+    cleaned = " ".join(value.strip().replace(",", "").split())
+    formats = (
+        "%Y-%m-%d",
+        "%d %B %Y",
+        "%d %b %Y",
+        "%B %d %Y",
+        "%b %d %Y",
     )
+    for fmt in formats:
+        try:
+            return datetime.strptime(cleaned, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def extract_signal(state: dict) -> dict:
-    """Convert one normalized career email into zero or more OpportunitySignals."""
     if not should_extract_signal(state):
         return {"opportunity_signals": []}
 
@@ -207,10 +217,10 @@ def extract_signal(state: dict) -> dict:
             role_title=item.role_title,
             location=item.location,
             opportunity_type=item.opportunity_type,
-            deadline_hint=item.deadline_hint,
-            target_major=item.target_major,
-            target_degree_level=item.target_degree_level,
-            urls=item.urls,
+            deadline_hint=_normalize_deadline(item.deadline_hint),
+            target_major=item.target_major or [],
+            target_degree_level=item.target_degree_level or [],
+            urls=item.urls or [],
             raw_text=item.evidence_text,
             resolution_status="unresolved",
         )

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from pydantic import BaseModel, Field
+
+from career_agent.tools.web_fetch import fetch_public_page
+from career_agent.tools.web_search import search_public_web
+
+LOGIN_WALL_HOSTS = {"nus-csm.symplicity.com"}
+MAX_SEARCH_PAGES = 3
 
 
 class ResearchedJob(BaseModel):
@@ -45,34 +52,72 @@ def _page_for_signal(signal: dict, pages: list[dict]) -> dict | None:
     return None
 
 
-def _research_one(signal: dict, page: dict | None) -> list[dict]:
-    page_text = (page or {}).get("text", "")[:12000]
-    page_title = (page or {}).get("title", "")
-    final_url = (page or {}).get("final_url")
+def _page_is_useful(page: dict | None) -> bool:
+    if not page or page.get("status_code") != 200:
+        return False
+    host = urlparse(page.get("final_url") or "").netloc.lower()
+    return host not in LOGIN_WALL_HOSTS and bool(page.get("text"))
+
+
+def _search_pages(signal: dict) -> list[dict]:
+    company = signal.get("company") or ""
+    title = signal.get("role_title") or ""
+    if not company and not title:
+        return []
+
+    query = " ".join(part for part in (company, title, "careers jobs") if part).strip()
+    pages: list[dict] = []
+
+    for result in search_public_web(query, max_results=5):
+        try:
+            fetched = fetch_public_page(result.url)
+        except Exception:
+            continue
+
+        pages.append(
+            {
+                "requested_url": result.url,
+                "final_url": fetched.final_url,
+                "status_code": fetched.status_code,
+                "title": fetched.title or result.title,
+                "text": fetched.text or result.snippet,
+                "discovered_by_search": True,
+            }
+        )
+        if len(pages) >= MAX_SEARCH_PAGES:
+            break
+
+    return pages
+
+
+def _research_one(signal: dict, pages: list[dict]) -> list[dict]:
+    evidence_blocks: list[str] = []
+    for index, page in enumerate(pages, start=1):
+        evidence_blocks.append(
+            f"PAGE {index}\n"
+            f"FINAL URL: {page.get('final_url')}\n"
+            f"TITLE: {page.get('title', '')}\n"
+            f"TEXT:\n{(page.get('text') or '')[:9000]}"
+        )
 
     prompt = f"""
-You convert one NUS career opportunity signal plus optional public webpage evidence
-into zero or more concrete JOB records.
+You convert one NUS career opportunity signal plus public-web evidence into zero or
+more concrete JOB records.
 
 Only return actual employment opportunities: internships or full-time/graduate jobs.
 Do NOT return workshops, networking events, webinars, competitions, career fairs,
 or generic career programmes unless they contain a specific job opening.
+Prefer an official employer career/job posting over aggregators or school pages.
 Do not invent facts. Empty fields are better than guesses.
 Use opportunity_type only internship, full_time, or unknown.
-If a public page is clearly the job posting, use its final URL as official_url.
-Evidence must be short snippets grounded in the signal/page.
+Set official_url only when the evidence supports that URL as the actual job/employer page.
+Evidence must be short snippets grounded in the supplied signal/pages.
 
 SIGNAL:
 {signal}
 
-PAGE TITLE:
-{page_title}
-
-FINAL URL:
-{final_url}
-
-PUBLIC PAGE TEXT:
-{page_text}
+PUBLIC WEB EVIDENCE:
+{chr(10).join(evidence_blocks) if evidence_blocks else '<none>'}
 """.strip()
 
     result = _build_llm().invoke(prompt)
@@ -80,9 +125,9 @@ PUBLIC PAGE TEXT:
 
 
 def research_job(state: dict) -> dict:
-    """Turn opportunity signals into concrete candidate jobs using public evidence."""
+    """Turn opportunity signals into candidate jobs, searching publicly when needed."""
     signals = state.get("opportunity_signals") or []
-    pages = state.get("resolved_pages") or []
+    resolved_pages = list(state.get("resolved_pages") or [])
     errors = list(state.get("errors", []))
     candidate_jobs: list[dict] = []
 
@@ -90,9 +135,21 @@ def research_job(state: dict) -> dict:
         for signal in signals:
             if signal.get("opportunity_type") == "event":
                 continue
-            page = _page_for_signal(signal, pages)
-            candidate_jobs.extend(_research_one(signal, page))
+
+            direct_page = _page_for_signal(signal, resolved_pages)
+            evidence_pages = [direct_page] if _page_is_useful(direct_page) else []
+
+            if not evidence_pages:
+                searched_pages = _search_pages(signal)
+                resolved_pages.extend(searched_pages)
+                evidence_pages = searched_pages
+
+            candidate_jobs.extend(_research_one(signal, evidence_pages))
     except Exception as exc:
         errors.append(f"job research failed: {exc}")
 
-    return {"candidate_jobs": candidate_jobs, "errors": errors}
+    return {
+        "candidate_jobs": candidate_jobs,
+        "resolved_pages": resolved_pages,
+        "errors": errors,
+    }

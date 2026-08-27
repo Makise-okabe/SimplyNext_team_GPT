@@ -6,6 +6,8 @@ __pycache__/
 .env.*
 !.env.example
 private_data/
+data/
+*.egg-info/
 *.eml
 *.msg
 token_cache*

@@ -28,16 +28,16 @@ class OpportunitySignal(BaseModel):
 
 
 class ExtractedOpportunity(BaseModel):
-    """LLM-only schema before source metadata is attached deterministically."""
+    """Tolerant LLM-only schema before deterministic normalization."""
 
     company: str | None = None
     role_title: str | None = None
     location: str | None = None
     opportunity_type: OpportunityType = "unknown"
-    deadline_hint: date | None = None
-    target_major: list[str] = Field(default_factory=list)
-    target_degree_level: list[str] = Field(default_factory=list)
-    urls: list[str] = Field(default_factory=list)
+    deadline_hint: str | None = None
+    target_major: list[str] | None = None
+    target_degree_level: list[str] | None = None
+    urls: list[str] | None = None
     evidence_text: str = ""
 
 

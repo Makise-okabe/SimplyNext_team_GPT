@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import re
 from html import unescape
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
 from career_agent.models.email import EmailMessage
+
+URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
+TRAILING_URL_PUNCTUATION = ".,;:!?)]}"
 
 
 def _dedupe_keep_order(values: list[str]) -> list[str]:
@@ -58,6 +62,20 @@ def extract_links_from_html(html: str, base_url: str | None = None) -> list[str]
     return _dedupe_keep_order(links)
 
 
+def extract_links_from_text(text: str) -> list[str]:
+    """Extract HTTP(S) URLs written directly in plain-text email bodies."""
+    if not text:
+        return []
+
+    links: list[str] = []
+    for match in URL_PATTERN.findall(text):
+        cleaned = match.rstrip(TRAILING_URL_PUNCTUATION)
+        if cleaned:
+            links.append(cleaned)
+
+    return _dedupe_keep_order(links)
+
+
 def normalize_email(message: EmailMessage) -> EmailMessage:
     """Return an EmailMessage with normalized text and links.
 
@@ -70,7 +88,8 @@ def normalize_email(message: EmailMessage) -> EmailMessage:
         body_text = html_to_text(message.body_html)
 
     html_links = extract_links_from_html(message.body_html)
-    links = _dedupe_keep_order([*message.links, *html_links])
+    text_links = extract_links_from_text(body_text)
+    links = _dedupe_keep_order([*message.links, *html_links, *text_links])
 
     return message.model_copy(
         update={

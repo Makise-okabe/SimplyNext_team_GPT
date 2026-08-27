@@ -39,7 +39,7 @@ def _build_llm():
         raise RuntimeError("GROQ_API_KEY is missing from .env")
 
     return ChatGroq(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         temperature=0,
     ).with_structured_output(ResearchedJobBatch)
 

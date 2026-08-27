@@ -19,14 +19,18 @@ DEFAULT_SENDERS = (
     "zeli.goh@nus.edu.sg",
     "no-reply@kinobi.asia",
 )
+SUPPORTED_AUTH_MODES = {"interactive", "device"}
 
 
 class OutlookGraphConnector(EmailConnector):
     """Read selected NUS career emails through delegated Microsoft Graph access.
 
-    Authentication uses MSAL device-code flow. The user's password is entered only
-    on Microsoft's login page. Access/refresh tokens are cached locally and must
-    never be committed to Git.
+    The default authentication mode is interactive browser OAuth. MSAL opens the
+    system browser and receives the authorization response on ``http://localhost``.
+    Device-code flow remains available as a diagnostic fallback.
+
+    The user's password is entered only on Microsoft's login page. Access/refresh
+    tokens are cached locally and must never be committed to Git.
     """
 
     def __init__(
@@ -35,6 +39,7 @@ class OutlookGraphConnector(EmailConnector):
         tenant_id: str | None = None,
         token_cache_path: str | Path = "token_cache.json",
         senders: Iterable[str] = DEFAULT_SENDERS,
+        auth_mode: str | None = None,
     ) -> None:
         load_dotenv()
 
@@ -42,11 +47,18 @@ class OutlookGraphConnector(EmailConnector):
         self.tenant_id = tenant_id or os.getenv("MS_TENANT_ID", "organizations")
         self.token_cache_path = Path(token_cache_path)
         self.senders = tuple(sender.lower() for sender in senders)
+        self.auth_mode = (auth_mode or os.getenv("MS_AUTH_MODE", "interactive")).lower()
 
         if not self.client_id:
             raise ValueError(
                 "MS_CLIENT_ID is missing. Create a Microsoft Entra app registration "
                 "and put its Application (client) ID in your local .env file."
+            )
+
+        if self.auth_mode not in SUPPORTED_AUTH_MODES:
+            raise ValueError(
+                f"Unsupported MS_AUTH_MODE={self.auth_mode!r}. "
+                f"Choose one of: {', '.join(sorted(SUPPORTED_AUTH_MODES))}."
             )
 
         self.cache = msal.SerializableTokenCache()
@@ -64,6 +76,24 @@ class OutlookGraphConnector(EmailConnector):
         if self.cache.has_state_changed:
             self.token_cache_path.write_text(self.cache.serialize(), encoding="utf-8")
 
+    def _acquire_interactive_token(self) -> dict:
+        print("Opening Microsoft sign-in in your default browser...")
+        print("Choose your NUS account when Microsoft asks which account to use.")
+        return self.app.acquire_token_interactive(
+            scopes=MAIL_SCOPES,
+            prompt="select_account",
+        )
+
+    def _acquire_device_token(self) -> dict:
+        flow = self.app.initiate_device_flow(scopes=MAIL_SCOPES)
+        if "user_code" not in flow:
+            raise RuntimeError(
+                f"Could not start device-code flow: {json.dumps(flow, indent=2)}"
+            )
+
+        print(flow["message"])
+        return self.app.acquire_token_by_device_flow(flow)
+
     def _get_access_token(self) -> str:
         accounts = self.app.get_accounts()
         result = None
@@ -72,19 +102,25 @@ class OutlookGraphConnector(EmailConnector):
             result = self.app.acquire_token_silent(MAIL_SCOPES, account=accounts[0])
 
         if not result:
-            flow = self.app.initiate_device_flow(scopes=MAIL_SCOPES)
-            if "user_code" not in flow:
-                raise RuntimeError(f"Could not start device-code flow: {json.dumps(flow, indent=2)}")
-
-            print(flow["message"])
-            result = self.app.acquire_token_by_device_flow(flow)
+            if self.auth_mode == "interactive":
+                result = self._acquire_interactive_token()
+            else:
+                result = self._acquire_device_token()
 
         self._persist_cache()
 
         if "access_token" not in result:
             error = result.get("error", "unknown_error")
             description = result.get("error_description", "No error description returned.")
-            raise RuntimeError(f"Microsoft authentication failed: {error}: {description}")
+            correlation_id = result.get("correlation_id", "not_returned")
+            error_codes = result.get("error_codes", [])
+            raise RuntimeError(
+                "Microsoft authentication failed:\n"
+                f"  error: {error}\n"
+                f"  description: {description}\n"
+                f"  error_codes: {error_codes}\n"
+                f"  correlation_id: {correlation_id}"
+            )
 
         return result["access_token"]
 

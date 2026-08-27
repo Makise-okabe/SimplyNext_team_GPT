@@ -101,6 +101,11 @@ def main() -> None:
         print(f"Verified jobs : {len(jobs)}")
         print(f"Errors        : {len(errors)}")
 
+        if errors:
+            print("\nPIPELINE ERRORS")
+            for error_index, error in enumerate(errors, start=1):
+                print(f"  {error_index}. {error}")
+
         for job_index, job in enumerate(jobs, start=1):
             print(f"\n  JOB {job_index}: {job.get('company')} — {job.get('title')}")
             print(f"    status : {job.get('verification_status')}")

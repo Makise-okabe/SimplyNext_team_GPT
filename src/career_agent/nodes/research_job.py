@@ -15,18 +15,18 @@ MAX_SEARCH_PAGES = 3
 
 
 class ResearchedJob(BaseModel):
-    company: str
-    title: str
+    company: str | None = None
+    title: str | None = None
     location: str | None = None
     opportunity_type: str = "unknown"
     official_url: str | None = None
     deadline: str | None = None
-    degree_requirements: list[str] = Field(default_factory=list)
-    required_skills: list[str] = Field(default_factory=list)
-    preferred_skills: list[str] = Field(default_factory=list)
+    degree_requirements: list[str] | None = None
+    required_skills: list[str] | None = None
+    preferred_skills: list[str] | None = None
     visa_information: str | None = None
     raw_description: str = ""
-    evidence: list[str] = Field(default_factory=list)
+    evidence: list[str] | None = None
 
 
 class ResearchedJobBatch(BaseModel):
@@ -111,6 +111,7 @@ Prefer an official employer career/job posting over aggregators or school pages.
 Do not invent facts. Empty fields are better than guesses.
 Use opportunity_type only internship, full_time, or unknown.
 Set official_url only when the evidence supports that URL as the actual job/employer page.
+If the employer/company is not stated, return company as null rather than guessing.
 Evidence must be short snippets grounded in the supplied signal/pages.
 
 SIGNAL:
@@ -121,7 +122,17 @@ PUBLIC WEB EVIDENCE:
 """.strip()
 
     result = _build_llm().invoke(prompt)
-    return [item.model_dump(mode="json") for item in result.jobs]
+    normalized: list[dict] = []
+    for item in result.jobs:
+        payload = item.model_dump(mode="json")
+        payload["company"] = payload.get("company") or signal.get("company")
+        payload["title"] = payload.get("title") or signal.get("role_title")
+        payload["degree_requirements"] = payload.get("degree_requirements") or []
+        payload["required_skills"] = payload.get("required_skills") or []
+        payload["preferred_skills"] = payload.get("preferred_skills") or []
+        payload["evidence"] = payload.get("evidence") or []
+        normalized.append(payload)
+    return normalized
 
 
 def research_job(state: dict) -> dict:

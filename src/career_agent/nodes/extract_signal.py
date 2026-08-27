@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 
 from career_agent.config import Settings
@@ -130,6 +131,7 @@ def _format_candidates(candidates: list[CandidateChunk]) -> str:
 
 
 def _build_llm() -> ChatGroq:
+    load_dotenv()
     if not os.getenv("GROQ_API_KEY"):
         raise RuntimeError("GROQ_API_KEY is missing from .env")
 

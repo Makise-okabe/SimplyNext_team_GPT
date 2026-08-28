@@ -16,6 +16,7 @@ from career_agent.models.signal import (
 
 MAX_CANDIDATES_PER_LLM_CALL = 8
 MAX_CONTEXT_CHARS = 900
+MAX_DIRECT_TEXT_CHARS = 7000
 
 ASSET_SUFFIXES = (
     ".png",
@@ -109,6 +110,22 @@ def build_candidate_chunks(text: str, urls: list[str]) -> list[CandidateChunk]:
     return candidates
 
 
+def _direct_text_candidate(email: dict) -> CandidateChunk | None:
+    """Create one candidate from a parsed attachment when no URL is required.
+
+    This is what lets a forwarded Goh Ze Li email containing a JD PDF enter
+    Track B even when the PDF itself has no public application URL.
+    """
+    attachment_text = (email.get("attachment_text") or "").strip()
+    if not attachment_text:
+        return None
+
+    return CandidateChunk(
+        url="",
+        context=attachment_text[:MAX_DIRECT_TEXT_CHARS],
+    )
+
+
 def _chunk_batches(values: list[CandidateChunk], size: int) -> list[list[CandidateChunk]]:
     return [values[index : index + size] for index in range(0, len(values), size)]
 
@@ -116,9 +133,10 @@ def _chunk_batches(values: list[CandidateChunk], size: int) -> list[list[Candida
 def _format_candidates(candidates: list[CandidateChunk]) -> str:
     blocks: list[str] = []
     for index, candidate in enumerate(candidates, start=1):
+        url_text = candidate.url or "<none: extracted directly from email/attachment>"
         blocks.append(
             f"CANDIDATE {index}\n"
-            f"URL: {candidate.url}\n"
+            f"URL: {url_text}\n"
             f"EMAIL CONTEXT:\n{candidate.context}"
         )
     return "\n\n---\n\n".join(blocks)
@@ -146,7 +164,8 @@ Rules:
 - Do not invent company, title, location, deadline, target major, or degree level.
 - Use null/empty values when the email fragment does not state something.
 - opportunity_type must be internship, full_time, event, or unknown.
-- Keep only URLs that belong to that opportunity.
+- Keep only URLs that belong to that opportunity. A candidate may have no URL when it
+  came directly from a PDF attachment; do not invent one.
 - Generic NUS navigation, social-media, image and mailbox links are not opportunities.
 - Multiple candidates may refer to one opportunity; avoid duplicate opportunities.
 - evidence_text must be a short verbatim-or-near-verbatim excerpt supporting the extraction.
@@ -191,6 +210,11 @@ def extract_signal(state: dict) -> dict:
     urls = state.get("extracted_links") or email.get("links") or []
 
     candidates = build_candidate_chunks(text, urls)
+
+    direct_candidate = _direct_text_candidate(email)
+    if direct_candidate:
+        candidates.append(direct_candidate)
+
     if not candidates:
         return {
             "opportunity_signals": [],
@@ -207,7 +231,19 @@ def extract_signal(state: dict) -> dict:
         return {"opportunity_signals": [], "errors": errors}
 
     signals: list[dict] = []
+    seen_keys: set[tuple[str, str, str]] = set()
+
     for item in extracted:
+        signal_urls = item.urls or []
+        key = (
+            (item.company or "").strip().lower(),
+            (item.role_title or "").strip().lower(),
+            "|".join(sorted(signal_urls)),
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+
         signal = OpportunitySignal(
             source_type="outlook",
             source_name=_source_name(email),
@@ -220,7 +256,7 @@ def extract_signal(state: dict) -> dict:
             deadline_hint=_normalize_deadline(item.deadline_hint),
             target_major=item.target_major or [],
             target_degree_level=item.target_degree_level or [],
-            urls=item.urls or [],
+            urls=signal_urls,
             raw_text=item.evidence_text,
             resolution_status="unresolved",
         )

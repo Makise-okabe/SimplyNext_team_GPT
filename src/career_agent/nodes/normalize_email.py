@@ -77,15 +77,19 @@ def extract_links_from_text(text: str) -> list[str]:
 
 
 def normalize_email(message: EmailMessage) -> EmailMessage:
-    """Return an EmailMessage with normalized text and links.
-
-    The function intentionally stays deterministic: no LLM is needed for basic
-    HTML cleanup or URL extraction.
-    """
+    """Normalize body, links, and in-memory attachment text deterministically."""
     body_text = (message.body_text or "").strip()
 
     if not body_text and message.body_html:
         body_text = html_to_text(message.body_html)
+
+    attachment_text = (message.attachment_text or "").strip()
+    if attachment_text:
+        body_text = (
+            f"{body_text}\n\n{attachment_text}".strip()
+            if body_text
+            else attachment_text
+        )
 
     html_links = extract_links_from_html(message.body_html)
     text_links = extract_links_from_text(body_text)

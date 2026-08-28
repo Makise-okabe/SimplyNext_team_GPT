@@ -9,6 +9,17 @@ from career_agent.models.job import Job
 LOGIN_WALL_HOSTS = {
     "nus-csm.symplicity.com",
 }
+GENERIC_APPLICATION_HOSTS = {
+    "forms.office.com",
+    "forms.microsoft.com",
+    "forms.cloud.microsoft",
+    "forms.gle",
+    "docs.google.com",
+    "airtable.com",
+    "www.airtable.com",
+    "typeform.com",
+    "www.typeform.com",
+}
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 
 
@@ -44,7 +55,9 @@ def _web_verification(job: dict, page: dict | None) -> tuple[str, str]:
     if not official_url:
         return "unresolved", "none"
 
-    host = urlparse(official_url).netloc.lower()
+    host = urlparse(str(official_url)).netloc.lower()
+    if host in GENERIC_APPLICATION_HOSTS:
+        return "unresolved", "none"
     if host in LOGIN_WALL_HOSTS:
         return "partial", "public_web"
 
@@ -97,7 +110,10 @@ def verify_job(state: dict) -> dict:
                 evidence.append(f"Page title: {page['title']}")
             evidence.append(f"Fetched URL: {page.get('final_url')}")
 
-        if status == "unresolved" and _source_attachment_verification(candidate, email):
+        # A trusted attached JD is stronger than a weak/partial public result.
+        # It may elevate unresolved/partial to source_verified, but it can never
+        # replace a true official-web verification.
+        if status != "verified" and _source_attachment_verification(candidate, email):
             status = "source_verified"
             basis = "trusted_email_attachment"
             source = email.get("sender_email") or email.get("sender_name") or "trusted NUS source"
@@ -108,14 +124,15 @@ def verify_job(state: dict) -> dict:
                 company=candidate.get("company") or "Unknown",
                 title=candidate.get("title") or "Unknown role",
                 location=candidate.get("location"),
-                opportunity_type=candidate.get("opportunity_type", "unknown"),
+                opportunity_type=candidate.get("opportunity_type") or "unknown",
                 official_url=candidate.get("official_url"),
+                application_url=candidate.get("application_url"),
                 deadline=candidate.get("deadline"),
-                degree_requirements=candidate.get("degree_requirements", []),
-                required_skills=candidate.get("required_skills", []),
-                preferred_skills=candidate.get("preferred_skills", []),
+                degree_requirements=candidate.get("degree_requirements") or [],
+                required_skills=candidate.get("required_skills") or [],
+                preferred_skills=candidate.get("preferred_skills") or [],
                 visa_information=candidate.get("visa_information"),
-                raw_description=candidate.get("raw_description", ""),
+                raw_description=candidate.get("raw_description") or "",
                 verification_status=status,
                 verification_basis=basis,
                 evidence=evidence,

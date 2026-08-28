@@ -99,3 +99,40 @@ def test_verify_job_can_source_verify_trusted_pdf_attachment() -> None:
     job = result["verified_jobs"][0]
     assert job["verification_status"] == "source_verified"
     assert job["verification_basis"] == "trusted_email_attachment"
+
+
+def test_trusted_attachment_beats_generic_form_as_verification_evidence() -> None:
+    result = verify_job(
+        {
+            "email": {
+                "message_id": "mckinsey-mail",
+                "sender_email": "zeli.goh@nus.edu.sg",
+                "attachment_text": (
+                    "McKinsey & Company Innovation and Learning Centre ILC Intern"
+                ),
+            },
+            "candidate_jobs": [
+                {
+                    "company": "McKinsey & Company",
+                    "title": "Innovation and Learning Centre (ILC) Intern",
+                    "opportunity_type": "internship",
+                    "official_url": "https://forms.office.com/r/kWP6hTFRTz",
+                    "application_url": "https://forms.office.com/r/kWP6hTFRTz",
+                }
+            ],
+            "resolved_pages": [
+                {
+                    "requested_url": "https://forms.office.com/r/kWP6hTFRTz",
+                    "final_url": "https://forms.office.com/r/kWP6hTFRTz",
+                    "status_code": 200,
+                    "title": "Microsoft Forms",
+                    "text": "McKinsey ILC internship application form",
+                }
+            ],
+            "errors": [],
+        }
+    )
+
+    job = result["verified_jobs"][0]
+    assert job["verification_status"] == "source_verified"
+    assert job["verification_basis"] == "trusted_email_attachment"

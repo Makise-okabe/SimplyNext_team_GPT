@@ -112,9 +112,10 @@ def main() -> None:
                 f"  JOB {job_index}: "
                 f"{job.get('company') or 'Unknown'} — {job.get('title') or 'Unknown'}"
             )
-            print("    status:", job.get("verification_status"))
-            print("    basis :", job.get("verification_basis"))
-            print("    url   :", job.get("official_url"))
+            print("    status :", job.get("verification_status"))
+            print("    basis  :", job.get("verification_basis"))
+            print("    official:", job.get("official_url"))
+            print("    apply  :", job.get("application_url"))
 
         if store and jobs:
             inserted, updated = store.upsert_jobs(

@@ -11,6 +11,7 @@ class Job(BaseModel):
     opportunity_type: Literal["internship", "full_time", "unknown"] = "unknown"
 
     official_url: HttpUrl | None = None
+    application_url: HttpUrl | None = None
     deadline: date | None = None
 
     degree_requirements: list[str] = Field(default_factory=list)

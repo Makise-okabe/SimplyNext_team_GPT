@@ -11,21 +11,41 @@ from career_agent.tools.web_fetch import fetch_public_page
 from career_agent.tools.web_search import search_public_web
 
 LOGIN_WALL_HOSTS = {"nus-csm.symplicity.com"}
+GENERIC_APPLICATION_HOSTS = {
+    "forms.office.com",
+    "forms.microsoft.com",
+    "forms.cloud.microsoft",
+    "forms.gle",
+    "docs.google.com",
+    "airtable.com",
+    "www.airtable.com",
+    "typeform.com",
+    "www.typeform.com",
+}
 MAX_SEARCH_PAGES = 3
+ALLOWED_OPPORTUNITY_TYPES = {"internship", "full_time", "unknown"}
 
 
 class ResearchedJob(BaseModel):
+    """Tolerant LLM schema before deterministic normalization.
+
+    Every field that a model may reasonably leave blank accepts ``None``. This is
+    deliberate: a missing optional fact should not turn a good extraction into a
+    provider-level structured-output validation error.
+    """
+
     company: str | None = None
     title: str | None = None
     location: str | None = None
-    opportunity_type: str = "unknown"
+    opportunity_type: str | None = None
     official_url: str | None = None
+    application_url: str | None = None
     deadline: str | None = None
     degree_requirements: list[str] | None = None
     required_skills: list[str] | None = None
     preferred_skills: list[str] | None = None
     visa_information: str | None = None
-    raw_description: str = ""
+    raw_description: str | None = None
     evidence: list[str] | None = None
 
 
@@ -90,6 +110,48 @@ def _search_pages(signal: dict) -> list[dict]:
     return pages
 
 
+def _is_generic_application_url(url: str | None) -> bool:
+    if not url:
+        return False
+    try:
+        host = urlparse(url).netloc.lower()
+    except ValueError:
+        return False
+    return host in GENERIC_APPLICATION_HOSTS
+
+
+def normalize_researched_job(item: ResearchedJob, signal: dict) -> dict:
+    """Convert tolerant LLM output into the strict downstream job payload."""
+    payload = item.model_dump(mode="json")
+
+    payload["company"] = payload.get("company") or signal.get("company")
+    payload["title"] = payload.get("title") or signal.get("role_title")
+    payload["location"] = payload.get("location") or signal.get("location")
+
+    opportunity_type = payload.get("opportunity_type") or signal.get("opportunity_type") or "unknown"
+    if opportunity_type not in ALLOWED_OPPORTUNITY_TYPES:
+        opportunity_type = "unknown"
+    payload["opportunity_type"] = opportunity_type
+
+    # A generic form can be a perfectly useful application destination, but it
+    # is not evidence of an employer-controlled careers page. Keep the link,
+    # just classify it correctly.
+    official_url = payload.get("official_url")
+    application_url = payload.get("application_url")
+    if _is_generic_application_url(official_url):
+        application_url = application_url or official_url
+        official_url = None
+
+    payload["official_url"] = official_url
+    payload["application_url"] = application_url
+    payload["degree_requirements"] = payload.get("degree_requirements") or []
+    payload["required_skills"] = payload.get("required_skills") or []
+    payload["preferred_skills"] = payload.get("preferred_skills") or []
+    payload["raw_description"] = payload.get("raw_description") or ""
+    payload["evidence"] = payload.get("evidence") or []
+    return payload
+
+
 def _research_one(signal: dict, pages: list[dict]) -> list[dict]:
     evidence_blocks: list[str] = []
     for index, page in enumerate(pages, start=1):
@@ -108,10 +170,13 @@ Only return actual employment opportunities: internships or full-time/graduate j
 Do NOT return workshops, networking events, webinars, competitions, career fairs,
 or generic career programmes unless they contain a specific job opening.
 Prefer an official employer career/job posting over aggregators or school pages.
-Do not invent facts. Empty fields are better than guesses.
+Do not invent facts. Null/empty fields are better than guesses.
 Use opportunity_type only internship, full_time, or unknown.
-Set official_url only when the evidence supports that URL as the actual job/employer page.
+Set official_url ONLY for an employer-controlled career/job page that describes the role.
+If the useful link is a Microsoft Form, Google Form, Typeform, Airtable form or similar
+application form, put it in application_url instead of official_url.
 If the employer/company is not stated, return company as null rather than guessing.
+raw_description may be null when no fuller description is supported.
 Evidence must be short snippets grounded in the supplied signal/pages.
 
 SIGNAL:
@@ -122,17 +187,7 @@ PUBLIC WEB EVIDENCE:
 """.strip()
 
     result = _build_llm().invoke(prompt)
-    normalized: list[dict] = []
-    for item in result.jobs:
-        payload = item.model_dump(mode="json")
-        payload["company"] = payload.get("company") or signal.get("company")
-        payload["title"] = payload.get("title") or signal.get("role_title")
-        payload["degree_requirements"] = payload.get("degree_requirements") or []
-        payload["required_skills"] = payload.get("required_skills") or []
-        payload["preferred_skills"] = payload.get("preferred_skills") or []
-        payload["evidence"] = payload.get("evidence") or []
-        normalized.append(payload)
-    return normalized
+    return [normalize_researched_job(item, signal) for item in result.jobs]
 
 
 def research_job(state: dict) -> dict:
@@ -142,11 +197,11 @@ def research_job(state: dict) -> dict:
     errors = list(state.get("errors", []))
     candidate_jobs: list[dict] = []
 
-    try:
-        for signal in signals:
-            if signal.get("opportunity_type") == "event":
-                continue
+    for signal in signals:
+        if signal.get("opportunity_type") == "event":
+            continue
 
+        try:
             direct_page = _page_for_signal(signal, resolved_pages)
             evidence_pages = [direct_page] if _page_is_useful(direct_page) else []
 
@@ -156,8 +211,12 @@ def research_job(state: dict) -> dict:
                 evidence_pages = searched_pages
 
             candidate_jobs.extend(_research_one(signal, evidence_pages))
-    except Exception as exc:
-        errors.append(f"job research failed: {exc}")
+        except Exception as exc:
+            # Fail one signal, not the entire email. A newsletter can contain many
+            # independent opportunities and one malformed model response should
+            # not erase all of the others.
+            label = signal.get("role_title") or signal.get("company") or "unknown opportunity"
+            errors.append(f"job research failed for {label}: {exc}")
 
     return {
         "candidate_jobs": candidate_jobs,

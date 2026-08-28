@@ -16,7 +16,6 @@ from career_agent.tools.web_search import SearchResult, search_public_web
 MAX_SEARCH_ROUNDS = 3
 MAX_RESULTS_PER_QUERY = 5
 MAX_FINAL_CANDIDATES = 5
-MAX_DISTINCTIVE_PHRASES_IN_QUERY = 2
 
 APPLICATION_FORM_HOSTS = {
     "forms.office.com",
@@ -28,6 +27,16 @@ APPLICATION_FORM_HOSTS = {
     "www.typeform.com",
     "airtable.com",
     "www.airtable.com",
+}
+
+# These are transport/navigation links that appear in forwarded Outlook email,
+# not evidence for the identity of an employer job posting.
+NOISE_DIRECT_HOSTS = {
+    "outlook.live.com",
+    "outlook.office.com",
+    "outlook.office365.com",
+    "aka.ms",
+    "login.microsoftonline.com",
 }
 
 AGGREGATOR_HOST_HINTS = (
@@ -67,6 +76,10 @@ GENERIC_WORDS = {
 }
 
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+PARENTHETICAL = re.compile(r"\s*\([^)]{1,30}\)\s*")
+CORPORATE_SUFFIX = re.compile(
+    r"(?i)\s+(?:&\s+company|company|pte\.?\s+ltd\.?|ltd\.?|inc\.?|corp\.?|corporation)$"
+)
 
 
 def _quote(value: str | None) -> str:
@@ -80,6 +93,15 @@ def _tokens(value: str | None) -> set[str]:
         for token in TOKEN_PATTERN.findall((value or "").lower())
         if len(token) >= 3 and token not in GENERIC_WORDS
     }
+
+
+def _search_company(identity: JobIdentity) -> str:
+    company = " ".join((identity.company or "").split()).strip()
+    return CORPORATE_SUFFIX.sub("", company).strip() or company
+
+
+def _without_parenthetical(value: str | None) -> str:
+    return " ".join(PARENTHETICAL.sub(" ", value or "").split())
 
 
 def _classify_url(url: str) -> str:
@@ -100,13 +122,17 @@ def _classify_url(url: str) -> str:
 
 
 def _metadata_query(identity: JobIdentity) -> str:
-    parts = [
-        _quote(identity.company),
-        _quote(identity.title),
-        identity.location or "",
-    ]
-    if identity.business_unit:
-        parts.append(_quote(identity.business_unit))
+    """Prefer a discriminative named unit over an over-quoted full job title."""
+    company = _search_company(identity)
+    unit = _without_parenthetical(identity.business_unit)
+    title = _without_parenthetical(identity.title)
+    location = identity.location or ""
+
+    if unit:
+        role_word = "internship" if identity.opportunity_type == "internship" else "job"
+        parts = [company, _quote(unit), location, role_word]
+    else:
+        parts = [company, _quote(title), location]
     return " ".join(part for part in parts if part).strip()
 
 
@@ -114,22 +140,40 @@ def _identifier_query(identity: JobIdentity) -> str | None:
     if not identity.identifiers:
         return None
     strongest = identity.identifiers[0]
-    parts = [_quote(strongest.value), _quote(identity.company)]
+    parts = [_quote(strongest.value), _search_company(identity)]
     return " ".join(part for part in parts if part).strip()
 
 
+def _best_distinctive_phrase(identity: JobIdentity) -> str | None:
+    title = _without_parenthetical(identity.title).lower()
+    unit = _without_parenthetical(identity.business_unit).lower()
+
+    # Do not repeat the title/business unit in round 2; search for a second,
+    # independently distinctive fingerprint from the JD.
+    for phrase in identity.distinctive_phrases:
+        cleaned = _without_parenthetical(phrase)
+        lowered = cleaned.lower()
+        if not cleaned:
+            continue
+        if lowered in title or lowered in unit or title in lowered or (unit and unit in lowered):
+            continue
+        return cleaned
+
+    return _without_parenthetical(identity.distinctive_phrases[0]) if identity.distinctive_phrases else None
+
+
 def _distinctive_query(identity: JobIdentity) -> str | None:
-    phrases = identity.distinctive_phrases[:MAX_DISTINCTIVE_PHRASES_IN_QUERY]
-    if not phrases:
+    phrase = _best_distinctive_phrase(identity)
+    if not phrase:
         return None
-    parts = [_quote(identity.company), *(_quote(phrase) for phrase in phrases)]
+    parts = [_search_company(identity), _quote(phrase)]
     if identity.location:
         parts.append(identity.location)
     return " ".join(part for part in parts if part).strip()
 
 
 def build_progressive_queries(identity: JobIdentity) -> list[tuple[str, str]]:
-    """Build deterministic search rounds from strongest to weakest evidence."""
+    """Build deterministic search rounds from strongest to weaker evidence."""
     queries: list[tuple[str, str]] = []
     identifier = _identifier_query(identity)
     if identifier:
@@ -184,12 +228,13 @@ def _score_result(identity: JobIdentity, result: SearchResult, strategy: str) ->
         score += 6
         metadata_hits.append("location")
 
-    if identity.business_unit and identity.business_unit.lower() in haystack:
+    unit = _without_parenthetical(identity.business_unit)
+    if unit and unit.lower() in haystack:
         score += 8
         metadata_hits.append("business_unit")
 
     for phrase in identity.distinctive_phrases:
-        if phrase.lower() in haystack:
+        if _without_parenthetical(phrase).lower() in haystack:
             phrase_hits.append(phrase)
     if phrase_hits:
         score += min(24, 8 * len(phrase_hits))
@@ -248,11 +293,14 @@ def _direct_candidates(identity: JobIdentity) -> dict[str, SearchCandidate]:
             host = urlparse(url).netloc.lower()
         except ValueError:
             continue
+        if host in NOISE_DIRECT_HOSTS:
+            continue
+
         kind = _classify_url(url)
         score = 40.0 if kind == "employer_or_ats" else 18.0
         reasons = ["URL supplied directly by source email"]
         if kind == "application_form":
-            reasons.append("application form retained as candidate evidence only")
+            reasons.append("application form retained as application evidence only")
         candidates[url] = SearchCandidate(
             url=url,
             host=host,
@@ -285,8 +333,6 @@ def discover_candidates(identity: JobIdentity) -> CandidateDiscoveryResult:
     raw_results_seen = 0
     stopped_reason = "search_budget_exhausted"
 
-    # Direct employer/ATS URLs are high-value enough that V3 can inspect them
-    # immediately without spending a search call.
     if any(c.url_kind == "employer_or_ats" for c in candidates.values()):
         stopped_reason = "direct_employer_candidate_available"
     else:

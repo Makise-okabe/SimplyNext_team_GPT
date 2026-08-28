@@ -67,4 +67,5 @@ class SameJobVerificationResult(BaseModel):
     matched_evidence: list[str] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
     metrics: VerificationMetrics = Field(default_factory=VerificationMetrics)
+    warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)

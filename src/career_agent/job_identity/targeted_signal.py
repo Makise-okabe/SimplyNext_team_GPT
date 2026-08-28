@@ -10,6 +10,11 @@ from career_agent.models.email import EmailMessage
 from career_agent.models.signal import OpportunitySignal
 
 BASED_IN_PATTERN = re.compile(r"(?i)based\s+in\s+([A-Za-z][A-Za-z .'-]{2,40})")
+SECTION_HEADING_PATTERN = re.compile(
+    r"(?im)^[ \t]*(?:\*\*)?"
+    r"(?P<section>jobs|full[- ]time jobs|internships?|internship opportunities)"
+    r"(?:\*\*)?[ \t]*:?\s*$"
+)
 FULL_TIME_MARKERS = ("full-time", "full time", "graduate", "associate")
 INTERNSHIP_MARKERS = ("internship", "intern ", "intern-", " intern")
 GENERIC_COMPANY_WORDS = {
@@ -135,34 +140,26 @@ def _infer_type(context: str) -> str:
 
 
 def _infer_type_from_section(email: EmailMessage, title: str) -> str:
-    """Infer JOBS vs INTERNSHIPS from the nearest preceding newsletter section.
+    """Infer type from the nearest explicit section heading before the role.
 
-    Dense CFG newsletters often omit `Full-Time Job` from an individual row. The
-    surrounding section is still explicit source evidence and is more reliable
-    than guessing from the role title or a broad text window.
+    This is intentionally line-oriented. A heading at the very start of the
+    message (``JOBS\n...``) must count, and headings that appear after the target
+    role must never influence its type.
     """
     text = email.body_text or ""
     index = text.lower().find(title.lower())
     if index < 0:
         return "unknown"
 
-    prefix = text[:index].lower()
-    jobs_positions = [
-        prefix.rfind("\njobs"),
-        prefix.rfind(" jobs "),
-        prefix.rfind("**jobs**"),
-    ]
-    internship_positions = [
-        prefix.rfind("\ninternships"),
-        prefix.rfind(" internships "),
-        prefix.rfind("**internships"),
-    ]
-    last_jobs = max(jobs_positions)
-    last_internships = max(internship_positions)
-
-    if last_jobs < 0 and last_internships < 0:
+    prefix = text[:index]
+    matches = list(SECTION_HEADING_PATTERN.finditer(prefix))
+    if not matches:
         return "unknown"
-    return "full_time" if last_jobs > last_internships else "internship"
+
+    section = matches[-1].group("section").lower()
+    if section.startswith("intern"):
+        return "internship"
+    return "full_time"
 
 
 def _infer_location(context: str) -> str | None:

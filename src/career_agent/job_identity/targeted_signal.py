@@ -78,14 +78,7 @@ def _find_target_container(html: str, title: str) -> tuple[str, list[str]]:
 
 
 def _nearest_company_link(html: str, title: str, company: str) -> list[str]:
-    """Return only the company link nearest to the exact title in DOM order.
-
-    Forwarded Outlook HTML sometimes separates a visible table row from its
-    hyperlink markup, so the exact row can contain no <a> tag. Falling back to
-    every company-domain link is unsafe when a newsletter lists multiple roles
-    for the same employer (for example IBM jobId 88733 and 88762). In that case
-    select the single employer link closest to the title node instead.
-    """
+    """Return only the company link nearest to the exact title in DOM order."""
     if not html or not title or not company:
         return []
 
@@ -129,9 +122,7 @@ def _text_window(text: str, title: str, radius: int = 900) -> str:
 
 
 def _company_host_links(email: EmailMessage, company: str | None) -> list[str]:
-    return _dedupe(
-        [url for url in email.links if _is_company_url(url, company)]
-    )
+    return _dedupe([url for url in email.links if _is_company_url(url, company)])
 
 
 def _infer_type(context: str) -> str:
@@ -141,6 +132,37 @@ def _infer_type(context: str) -> str:
     if any(marker in lowered for marker in FULL_TIME_MARKERS):
         return "full_time"
     return "unknown"
+
+
+def _infer_type_from_section(email: EmailMessage, title: str) -> str:
+    """Infer JOBS vs INTERNSHIPS from the nearest preceding newsletter section.
+
+    Dense CFG newsletters often omit `Full-Time Job` from an individual row. The
+    surrounding section is still explicit source evidence and is more reliable
+    than guessing from the role title.
+    """
+    text = email.body_text or ""
+    index = text.lower().find(title.lower())
+    if index < 0:
+        return "unknown"
+
+    prefix = text[:index].lower()
+    jobs_positions = [
+        prefix.rfind("\njobs"),
+        prefix.rfind(" jobs "),
+        prefix.rfind("**jobs**"),
+    ]
+    internship_positions = [
+        prefix.rfind("\ninternships"),
+        prefix.rfind(" internships "),
+        prefix.rfind("**internships"),
+    ]
+    last_jobs = max(jobs_positions)
+    last_internships = max(internship_positions)
+
+    if last_jobs < 0 and last_internships < 0:
+        return "unknown"
+    return "full_time" if last_jobs > last_internships else "internship"
 
 
 def _infer_location(context: str) -> str | None:
@@ -175,15 +197,15 @@ def build_targeted_signal(
     if not context:
         return None
 
-    # Best case: the exact HTML row owns its links. If Outlook forwarding has
-    # separated the link markup, choose only the nearest employer-domain link.
-    # A final plain-text fallback still returns at most one company link so a
-    # neighbouring same-company role can never contaminate exact-target mode.
     urls = row_links
     if not urls:
         urls = _nearest_company_link(html, title, company)
     if not urls:
         urls = _company_host_links(email, company)[:1]
+
+    opportunity_type = _infer_type(context)
+    if opportunity_type == "unknown":
+        opportunity_type = _infer_type_from_section(email, title)
 
     return OpportunitySignal(
         source_type="outlook",
@@ -193,7 +215,7 @@ def build_targeted_signal(
         company=company,
         role_title=title,
         location=_infer_location(context),
-        opportunity_type=_infer_type(context),
+        opportunity_type=opportunity_type,
         urls=urls,
         raw_text=context[:2200],
         resolution_status="unresolved",

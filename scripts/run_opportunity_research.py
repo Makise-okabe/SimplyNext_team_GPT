@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 
 from career_agent.connectors.outlook_graph import OutlookGraphConnector
-from career_agent.job_identity.email_targeting import select_target_messages
 from career_agent.job_identity.extract_identity import extract_job_identities
 from career_agent.job_identity.official_research import (
     focus_email_for_target,
@@ -36,28 +35,19 @@ def main() -> None:
     args = parser.parse_args()
 
     connector = OutlookGraphConnector()
-    all_messages = connector.get_messages(top=args.scan, include_attachments=True)
-    messages = select_target_messages(
-        all_messages,
-        company=args.company,
-        title=args.title,
-        subject_hint=args.subject,
-        limit=args.limit,
-    )
+    messages = connector.get_messages(top=args.scan, include_attachments=True)
+    if args.subject:
+        needle = args.subject.lower()
+        messages = [message for message in messages if needle in message.subject.lower()]
+    messages = messages[: args.limit]
 
     print("=" * 108)
     print("SIMPLYNEXT V5 — OFFICIAL-FIRST OPPORTUNITY RESEARCH + PROVENANCE")
     print("=" * 108)
-    print("Career emails scanned :", len(all_messages))
     print("Career emails selected:", len(messages))
 
     if not messages:
-        target = " / ".join(value for value in (args.company, args.title) if value)
-        raise RuntimeError(
-            "No mailbox email contains the requested target"
-            + (f": {target}" if target else ".")
-            + " Increase --scan if the email is older."
-        )
+        raise RuntimeError("No matching career emails found.")
 
     for email_index, message in enumerate(messages, start=1):
         normalized = normalize_email(message)
@@ -91,10 +81,6 @@ def main() -> None:
         print("Target title  :", args.title or "<all>")
         print("Signals       :", len(signals))
         print("Identities    :", len(identities.identities))
-
-        if not signals:
-            print("\n  TARGET FOUND IN EMAIL, BUT EXTRACTION RETURNED ZERO SIGNALS")
-            print("  This is now an extraction issue, not a mailbox-selection issue.")
 
         for index, identity in enumerate(identities.identities, start=1):
             package = research_opportunity(identity, normalized)

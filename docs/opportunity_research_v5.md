@@ -9,6 +9,18 @@ V1-V4 proved that SimplyNext can ingest a trusted NUS career email, recover a co
 3. distinguish a concrete job posting from a broader programme/opportunity;
 4. return the original Outlook email pointer together with research evidence.
 
+## Dense newsletter guardrail
+
+Goh/CFG newsletters can contain dozens of roles in one HTML table. Generic LLM extraction may occasionally omit a row. When a concrete `--company` and `--title` are explicitly supplied for diagnosis/live acceptance, V5 now has a deterministic targeted extraction fallback:
+
+- exact title must occur in the source email;
+- the nearest HTML table row is used as evidence when available;
+- hyperlinks are taken from that exact row, preventing neighbouring jobs from leaking into the target;
+- only if HTML row association is unavailable does the fallback use company-domain links;
+- no role is fabricated when the exact title is absent.
+
+The generic LLM signal extractor remains available for broad inbox discovery; this fallback is a precision guardrail for concrete target recovery.
+
 ## Evidence tiers
 
 ### Official

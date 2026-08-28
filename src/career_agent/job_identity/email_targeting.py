@@ -8,6 +8,29 @@ def _normalize(value: str | None) -> str:
     return " ".join((value or "").lower().split())
 
 
+def _target_hits(
+    email: EmailMessage,
+    company: str | None = None,
+    title: str | None = None,
+) -> tuple[bool, bool]:
+    """Return whether the concrete company/title target occurs in this email."""
+    normalized = normalize_email(email)
+    body = _normalize(normalized.body_text)
+    subject = _normalize(normalized.subject)
+    company_value = _normalize(company)
+    title_value = _normalize(title)
+
+    company_hit = bool(
+        company_value
+        and (company_value in body or company_value in subject)
+    )
+    title_hit = bool(
+        title_value
+        and (title_value in body or title_value in subject)
+    )
+    return company_hit, title_hit
+
+
 def target_relevance_score(
     email: EmailMessage,
     company: str | None = None,
@@ -17,7 +40,8 @@ def target_relevance_score(
     """Rank mailbox messages before --limit is applied.
 
     The concrete role title in the message body is the strongest signal, followed
-    by the target company. A broad newsletter subject is only a weak hint.
+    by the target company. A broad newsletter subject is only a weak ranking hint
+    and must never make an otherwise irrelevant email eligible by itself.
     """
     normalized = normalize_email(email)
     body = _normalize(normalized.body_text)
@@ -49,30 +73,37 @@ def select_target_messages(
     subject_hint: str | None = None,
     limit: int = 1,
 ) -> list[EmailMessage]:
-    ranked = [
-        (
-            target_relevance_score(
-                message,
-                company=company,
-                title=title,
-                subject_hint=subject_hint,
-            ),
-            message,
-        )
-        for message in messages
-    ]
+    ranked: list[tuple[int, EmailMessage]] = []
 
-    # When a concrete target is supplied, do not silently fall back to an email
-    # that contains neither the company nor role. This avoids false zero-signal
-    # test runs against similarly named newsletters.
-    if company or title:
-        ranked = [item for item in ranked if item[0] > 0]
-    elif subject_hint:
-        ranked = [
-            item
-            for item in ranked
-            if _normalize(subject_hint) in _normalize(item[1].subject)
-        ]
+    for message in messages:
+        company_hit, title_hit = _target_hits(
+            message,
+            company=company,
+            title=title,
+        )
+
+        # Concrete targeting rule: subject_hint is never sufficient. When a
+        # company/title target is supplied, at least one concrete target must
+        # actually occur in the email body/subject before the message can enter
+        # the ranking pool.
+        if (company or title) and not (company_hit or title_hit):
+            continue
+
+        if not company and not title and subject_hint:
+            if _normalize(subject_hint) not in _normalize(message.subject):
+                continue
+
+        ranked.append(
+            (
+                target_relevance_score(
+                    message,
+                    company=company,
+                    title=title,
+                    subject_hint=subject_hint,
+                ),
+                message,
+            )
+        )
 
     ranked.sort(
         key=lambda item: (

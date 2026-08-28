@@ -1,5 +1,6 @@
 from datetime import date
 from typing import Literal
+
 from pydantic import BaseModel, Field, HttpUrl
 
 
@@ -19,5 +20,18 @@ class Job(BaseModel):
     visa_information: str | None = None
     raw_description: str = ""
 
-    verification_status: Literal["verified", "partial", "unresolved"] = "unresolved"
+    # "verified" means an official/public page was matched. "source_verified"
+    # means a trusted NUS career source plus attached JD directly supports the role.
+    verification_status: Literal[
+        "verified",
+        "source_verified",
+        "partial",
+        "unresolved",
+    ] = "unresolved"
+    verification_basis: Literal[
+        "official_web",
+        "trusted_email_attachment",
+        "public_web",
+        "none",
+    ] = "none"
     evidence: list[str] = Field(default_factory=list)

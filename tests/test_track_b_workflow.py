@@ -45,7 +45,9 @@ def test_verify_job_marks_matching_public_page_verified() -> None:
 
     result = verify_job(state)
 
-    assert result["verified_jobs"][0]["verification_status"] == "verified"
+    job = result["verified_jobs"][0]
+    assert job["verification_status"] == "verified"
+    assert job["verification_basis"] == "official_web"
 
 
 def test_verify_job_is_conservative_without_page() -> None:
@@ -64,4 +66,36 @@ def test_verify_job_is_conservative_without_page() -> None:
         }
     )
 
-    assert result["verified_jobs"][0]["verification_status"] == "partial"
+    job = result["verified_jobs"][0]
+    assert job["verification_status"] == "partial"
+    assert job["verification_basis"] == "public_web"
+
+
+def test_verify_job_can_source_verify_trusted_pdf_attachment() -> None:
+    result = verify_job(
+        {
+            "email": {
+                "message_id": "mckinsey-mail",
+                "sender_name": "Goh Ze Li",
+                "sender_email": "zeli.goh@nus.edu.sg",
+                "attachment_text": (
+                    "Role: Innovation and Learning Centre ILC Intern. "
+                    "McKinsey & Company is hiring this intern in Singapore."
+                ),
+            },
+            "candidate_jobs": [
+                {
+                    "company": "McKinsey & Company",
+                    "title": "Innovation and Learning Centre (ILC) Intern",
+                    "opportunity_type": "internship",
+                    "official_url": None,
+                }
+            ],
+            "resolved_pages": [],
+            "errors": [],
+        }
+    )
+
+    job = result["verified_jobs"][0]
+    assert job["verification_status"] == "source_verified"
+    assert job["verification_basis"] == "trusted_email_attachment"

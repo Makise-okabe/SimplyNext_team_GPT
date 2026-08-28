@@ -1,70 +1,66 @@
-# Architecture — Prototype 1
+# Architecture — SimplyNext Prototype
 
 ## Goal
 
-Convert NUS career-related Outlook emails into verified public/official job records.
+Convert forwarded NUS career information into evidence-backed, deduplicated opportunity records without requiring direct access to a student's institutional mailbox.
 
-## Core flow
+## Live flow
 
 ```text
-START
-  |
-load_email
-  |
-filter_email
-  |
-career related?
-  |-- no --> END
-  |
- yes
-  |
-normalize_email
-  |
-extract_signal
-  |
-enough information?
-  |-- no --> resolve_links --> extract_signal
-  |
-research_job
-  |
-official posting found?
-  |-- no --> unresolved
-  |
- yes
-  |
-verify_job
-  |
-save_job
-  |
-END
+NUS career email
+      |
+student forwarding rule
+      |
+dedicated SimplyNext Outlook inbox
+      |
+Microsoft Graph (delegated Mail.Read)
+      |
+recover original sender + subject
+      |
+parse HTML / links / PDF attachments in memory
+      |
+normalized EmailMessage
+      |
+LangGraph Track B
+      |
+OpportunitySignal
+      |
+public / official web research
+      |
+verification
+      |-------------------------------|
+      |                               |
+official web matched          trusted NUS attachment matched
+      |                               |
+verified                     source_verified
+      |                               |
+      |----------- structured record -|
+                      |
+             optional SQLite memory
+             (no raw email/PDF text)
 ```
+
+## Privacy-minimised ingestion
+
+The dedicated inbox is an ingestion gateway, not an archive copied into the repository. PDF bytes are fetched from Graph and parsed in memory. Raw email bodies, PDF bytes and attachment text are not persisted by default.
+
+When product memory is enabled, SimplyNext stores only normalized opportunity fields such as company, title, location, deadline, verification state and source provenance. This lets the prototype deduplicate opportunities and support a future dashboard without retaining raw mailbox content.
+
+## Verification semantics
+
+- `verified`: identity matched against a fetched public/official posting.
+- `source_verified`: identity matched directly against a PDF attachment from a trusted NUS career source, but no live official posting was proven.
+- `partial`: a public URL exists but evidence is incomplete or inaccessible.
+- `unresolved`: neither public evidence nor trusted attachment evidence is sufficient.
+
+This distinction avoids pretending that an old or removed official posting is still live simply because NUS distributed a valid JD.
 
 ## Design principle
 
 LangGraph is the orchestrator.
 
-Use deterministic Python for:
-- sender/subject filtering
-- HTML parsing
-- URL extraction
-- redirect handling
-- deduplication
-- date comparisons
-- storage
+Use deterministic Python for sender recovery, HTML/PDF parsing, URL extraction, attachment handling, deduplication, verification checks and storage. Use LLM reasoning only where ambiguity exists: extracting opportunity signals, researching candidate postings and interpreting free-form requirements.
 
-Use LLM reasoning only where ambiguity exists:
-- extracting opportunity signals from free-form career emails
-- deciding what to search for
-- matching a signal to a candidate official posting
-- resolving ambiguous job requirements
+## Next product layers
 
-## Future architecture
-
-After the single workflow is stable, split only where context isolation is useful:
-
-- Supervisor
-- Email Intelligence Agent
-- Job Research Agent
-- Profile Match Agent
-
-Future deployment may wrap the same LangGraph workflow in AWS Bedrock AgentCore.
+The current `OpportunityStore` is intentionally replaceable. A later hosted version can swap SQLite for DynamoDB/PostgreSQL without changing the Graph ingestion or LangGraph workflow. The structured store can feed a student profile matcher, ranking layer, notification agent and web UI.

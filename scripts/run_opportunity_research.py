@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 
 from career_agent.connectors.outlook_graph import OutlookGraphConnector
+from career_agent.job_identity.concrete_job_research import (
+    research_concrete_job_or_delegate,
+)
 from career_agent.job_identity.email_targeting import select_target_messages
 from career_agent.job_identity.extract_identity import extract_job_identities
-from career_agent.job_identity.official_research import (
-    focus_email_for_target,
-    research_opportunity,
-)
+from career_agent.job_identity.official_research import focus_email_for_target
 from career_agent.job_identity.targeted_signal import build_targeted_signal
 from career_agent.nodes.extract_signal import extract_signal
 from career_agent.nodes.normalize_email import normalize_email
@@ -124,7 +124,7 @@ def main() -> None:
                 print("\n  EXTRACTION RETURNED ZERO SIGNALS")
 
         for index, identity in enumerate(identities.identities, start=1):
-            package = research_opportunity(identity, normalized)
+            package = research_concrete_job_or_delegate(identity, normalized)
 
             print("\n  " + "=" * 98)
             print(f"  OPPORTUNITY {index}/{len(identities.identities)}")

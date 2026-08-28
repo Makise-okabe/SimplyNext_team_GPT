@@ -139,7 +139,7 @@ def _infer_type_from_section(email: EmailMessage, title: str) -> str:
 
     Dense CFG newsletters often omit `Full-Time Job` from an individual row. The
     surrounding section is still explicit source evidence and is more reliable
-    than guessing from the role title.
+    than guessing from the role title or a broad text window.
     """
     text = email.body_text or ""
     index = text.lower().find(title.lower())
@@ -203,9 +203,13 @@ def build_targeted_signal(
     if not urls:
         urls = _company_host_links(email, company)[:1]
 
-    opportunity_type = _infer_type(context)
+    # Structural newsletter evidence is stronger than keyword scans over a broad
+    # target window. For example, a JOBS row can sit just before the INTERNSHIPS
+    # heading; scanning that window first would incorrectly label the job as an
+    # internship.
+    opportunity_type = _infer_type_from_section(email, title)
     if opportunity_type == "unknown":
-        opportunity_type = _infer_type_from_section(email, title)
+        opportunity_type = _infer_type(context)
 
     return OpportunitySignal(
         source_type="outlook",

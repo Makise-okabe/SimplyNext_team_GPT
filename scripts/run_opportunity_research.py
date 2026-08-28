@@ -67,23 +67,12 @@ def main() -> None:
             company=args.company,
             title=args.title,
         )
-        state = {
-            "email": focused.model_dump(mode="json"),
-            "normalized_text": focused.body_text,
-            "extracted_links": focused.links,
-            "errors": [],
-        }
-        signal_result = extract_signal(state)
-        signals = signal_result.get("opportunity_signals", [])
-        signals = [
-            signal
-            for signal in signals
-            if _matches(signal.get("company"), args.company)
-            and _matches(signal.get("role_title"), args.title)
-        ]
 
-        fallback_used = False
-        if not signals and args.company and args.title:
+        signals: list[dict] = []
+        extraction_errors: list[str] = []
+        deterministic_target = bool(args.company and args.title)
+
+        if deterministic_target:
             targeted = build_targeted_signal(
                 normalized,
                 company=args.company,
@@ -91,7 +80,24 @@ def main() -> None:
             )
             if targeted is not None:
                 signals = [targeted.model_dump(mode="json")]
-                fallback_used = True
+            signal_source = "deterministic exact target"
+        else:
+            state = {
+                "email": focused.model_dump(mode="json"),
+                "normalized_text": focused.body_text,
+                "extracted_links": focused.links,
+                "errors": [],
+            }
+            signal_result = extract_signal(state)
+            signals = signal_result.get("opportunity_signals", [])
+            signals = [
+                signal
+                for signal in signals
+                if _matches(signal.get("company"), args.company)
+                and _matches(signal.get("role_title"), args.title)
+            ]
+            extraction_errors = signal_result.get("errors", [])
+            signal_source = "generic extractor"
 
         identities = extract_job_identities(focused, signals)
 
@@ -102,18 +108,20 @@ def main() -> None:
         print("Target company:", args.company or "<all>")
         print("Target title  :", args.title or "<all>")
         print("Signals       :", len(signals))
-        print("Signal source :", "deterministic target fallback" if fallback_used else "generic extractor")
+        print("Signal source :", signal_source)
         print("Identities    :", len(identities.identities))
 
-        extraction_errors = signal_result.get("errors", [])
         if extraction_errors:
             print("\n  EXTRACTION DIAGNOSTICS")
             for error in extraction_errors:
                 print("   -", error)
 
         if not signals:
-            print("\n  TARGET FOUND IN EMAIL, BUT EXTRACTION RETURNED ZERO SIGNALS")
-            print("  Generic extraction and deterministic target fallback both failed.")
+            if deterministic_target:
+                print("\n  EXACT TARGET WAS NOT RECOVERED FROM THE SELECTED EMAIL")
+                print("  No generic LLM extraction was attempted in exact-target mode.")
+            else:
+                print("\n  EXTRACTION RETURNED ZERO SIGNALS")
 
         for index, identity in enumerate(identities.identities, start=1):
             package = research_opportunity(identity, normalized)

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
+from career_agent.config import Settings
 from career_agent.job_identity.official_research import (
     _application_url,
     _direct_candidates,
@@ -144,6 +145,110 @@ def _refresh_trace_counts(step, candidates: list[ResearchCandidate]) -> None:
     step.official_results = sum(1 for item in candidates if item.tier == "official")
     step.secondary_results = sum(
         1 for item in candidates if item.tier in {"secondary", "institutional"}
+    )
+
+
+def _title_tokens(value: str | None) -> set[str]:
+    return {
+        token
+        for token in TOKEN_PATTERN.findall((value or "").lower())
+        if len(token) >= 3 or token.isdigit()
+    }
+
+
+def _candidate_metadata_text(candidate: ResearchCandidate) -> str:
+    try:
+        parsed = urlparse(candidate.url)
+        url_text = unquote(f"{parsed.netloc} {parsed.path} {parsed.query}")
+    except ValueError:
+        url_text = candidate.url
+    return f"{candidate.title} {candidate.snippet} {url_text}"
+
+
+def _metadata_title_overlap(title: str | None, candidate: ResearchCandidate) -> float:
+    source = _title_tokens(title)
+    if not source:
+        return 0.0
+    return len(source & _title_tokens(_candidate_metadata_text(candidate))) / len(source)
+
+
+def _official_metadata_match(
+    identity: JobIdentity,
+    candidate: ResearchCandidate,
+) -> bool:
+    """Conservative V5 fallback for strong official job-result metadata.
+
+    Normal V3 fetched-content verification always runs first. This fallback only
+    applies when that verification is inconclusive and the search result itself is
+    an official job-like page with strong title agreement. It is useful for
+    dynamic employer sites that expose the exact role in indexed metadata but do
+    not provide enough static body text for V3's stricter JD-content guardrails.
+    """
+    if candidate.tier != "official" or candidate.relation != "exact_posting":
+        return False
+    if candidate.score < 70:
+        return False
+
+    full_overlap = _metadata_title_overlap(identity.title, candidate)
+    core_overlap = _metadata_title_overlap(_core_title(identity.title), candidate)
+    return full_overlap >= 0.80 and core_overlap >= 0.90
+
+
+def _trusted_source(email: EmailMessage) -> bool:
+    return (email.sender_email or "").strip().lower() in Settings().trusted_senders
+
+
+def _hard_conflicts(verification) -> list[str]:
+    return [
+        conflict
+        for evaluation in verification.evaluations
+        for conflict in evaluation.hard_conflicts
+    ]
+
+
+def _official_metadata_package(
+    *,
+    identity: JobIdentity,
+    email: EmailMessage,
+    candidate: ResearchCandidate,
+    candidates: list[ResearchCandidate],
+    trace,
+    search_calls: int,
+    fetch_calls: int,
+    judge_llm_calls: int,
+    warnings: list[str],
+    errors: list[str],
+    started: float,
+) -> OpportunityResearchPackage:
+    full_overlap = _metadata_title_overlap(identity.title, candidate)
+    warnings = [
+        *warnings,
+        "V3 fetched-content verification was inconclusive; V5 accepted a medium-confidence exact-job match from trusted source + strong official job metadata",
+    ]
+    return OpportunityResearchPackage(
+        identity=identity,
+        record_kind="job_posting",
+        status="verified_exact_job",
+        confidence="medium",
+        basis="official_job_metadata_match",
+        provenance=build_provenance(email),
+        official_job_url=candidate.url,
+        application_url=candidate.url,
+        candidates=candidates,
+        trace=trace,
+        evidence_summary=[
+            f"trusted NUS career source names the role: {identity.title}",
+            f"official employer/ATS job metadata title overlap={full_overlap:.2f}",
+            f"official job URL: {candidate.url}",
+        ],
+        warnings=list(dict.fromkeys(warnings)),
+        errors=list(dict.fromkeys(errors)),
+        metrics=ResearchMetrics(
+            search_calls=search_calls,
+            fetch_calls=fetch_calls,
+            judge_llm_calls=judge_llm_calls,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        ),
     )
 
 
@@ -296,6 +401,28 @@ def research_concrete_job_or_delegate(
             package.metrics.judge_llm_calls = judge_llm_calls
             return package
 
+        # Keep sealed V3 conservative. V5 may still accept a bounded metadata
+        # match when the trusted source and a strong official job result agree and
+        # V3 observed no hard identifier/year conflict.
+        metadata_candidate = next(
+            (candidate for candidate in official if _official_metadata_match(identity, candidate)),
+            None,
+        )
+        if metadata_candidate and _trusted_source(email) and not _hard_conflicts(verification):
+            return _official_metadata_package(
+                identity=identity,
+                email=email,
+                candidate=metadata_candidate,
+                candidates=candidates,
+                trace=trace,
+                search_calls=search_calls,
+                fetch_calls=fetch_calls,
+                judge_llm_calls=judge_llm_calls,
+                warnings=warnings,
+                errors=errors,
+                started=started,
+            )
+
     # Round 3: only after both official attempts fail to verify the same job.
     found, step, error = _search_round(
         identity,
@@ -341,6 +468,29 @@ def research_concrete_job_or_delegate(
             package.metrics.fetch_calls = fetch_calls
             package.metrics.judge_llm_calls = judge_llm_calls
             return package
+
+        metadata_candidate = next(
+            (
+                candidate
+                for candidate in newly_official
+                if _official_metadata_match(identity, candidate)
+            ),
+            None,
+        )
+        if metadata_candidate and _trusted_source(email) and not _hard_conflicts(verification):
+            return _official_metadata_package(
+                identity=identity,
+                email=email,
+                candidate=metadata_candidate,
+                candidates=candidates,
+                trace=trace,
+                search_calls=search_calls,
+                fetch_calls=fetch_calls,
+                judge_llm_calls=judge_llm_calls,
+                warnings=warnings,
+                errors=errors,
+                started=started,
+            )
 
     secondary = [
         item for item in candidates if item.tier in {"secondary", "institutional"}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import time
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from career_agent.config import Settings
 from career_agent.job_identity.official_research import (
@@ -53,6 +53,17 @@ COMPANY_ALIAS_STOPWORDS = {
 }
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 YEAR_PATTERN = re.compile(r"\b20\d{2}\b")
+JOB_QUERY_KEYS = {
+    "jobid",
+    "job_id",
+    "jobcode",
+    "job_code",
+    "requisitionid",
+    "requisition_id",
+    "reqid",
+    "positionid",
+    "position_id",
+}
 
 # Round 1 may stop the search only when the candidate is already a strong,
 # official, job-like match. The score is not used alone: title and core-title
@@ -108,36 +119,62 @@ def _host_tokens(host: str) -> set[str]:
     return set(TOKEN_PATTERN.findall(host.lower()))
 
 
+def _enhanced_job_like_url(url: str) -> bool:
+    """Recognize concrete employer job-detail URLs beyond the legacy patterns.
+
+    Some career systems use paths such as ``/CSJobDetail`` and query keys such as
+    ``jobCode`` rather than ``/job/`` or ``jobId``. Those are still concrete job
+    postings and should outrank a generic programme-name heuristic.
+    """
+    if _job_like_url(url):
+        return True
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    path = parsed.path.lower()
+    query_keys = {key.lower() for key in parse_qs(parsed.query)}
+    if query_keys & JOB_QUERY_KEYS:
+        return True
+    return any(marker in path for marker in ("jobdetail", "job-detail", "job_detail"))
+
+
 def _promote_brand_official_candidates(
     identity: JobIdentity,
     candidates: list[ResearchCandidate],
 ) -> list[ResearchCandidate]:
-    """Promote a company-owned acronym domain missed by the base classifier."""
+    """Promote brand-owned domains and concrete direct job-detail URLs."""
     aliases = _company_host_aliases(identity.company)
-    if not aliases:
-        return candidates
-
     promoted: list[ResearchCandidate] = []
-    for candidate in candidates:
-        if candidate.tier != "weak" or not (aliases & _host_tokens(candidate.host)):
-            promoted.append(candidate)
-            continue
 
-        relation = "exact_posting" if _job_like_url(candidate.url) else "official_background"
+    for candidate in candidates:
+        tier = candidate.tier
+        relation = candidate.relation
+        score = candidate.score
+        reasons = list(candidate.reasons)
+
+        if tier == "weak" and aliases and (aliases & _host_tokens(candidate.host)):
+            tier = "official"
+            score = min(100.0, score + 40.0)
+            reasons.append("company brand/acronym matched official host")
+
+        if tier == "official" and _enhanced_job_like_url(candidate.url):
+            relation = "exact_posting"
+            is_direct = any(
+                "supplied directly by source email/jd" in reason.lower()
+                for reason in reasons
+            )
+            if is_direct:
+                score = max(score, 98.0)
+                reasons.append("direct official URL contains a concrete job-detail identifier")
+
         promoted.append(
             candidate.model_copy(
                 update={
-                    "tier": "official",
+                    "tier": tier,
                     "relation": relation,
-                    "score": min(100.0, candidate.score + 40.0),
-                    "reasons": list(
-                        dict.fromkeys(
-                            [
-                                *candidate.reasons,
-                                "company brand/acronym matched official host",
-                            ]
-                        )
-                    ),
+                    "score": score,
+                    "reasons": list(dict.fromkeys(reasons)),
                 }
             )
         )
@@ -197,11 +234,7 @@ def _best_strong_official_candidate(
     identity: JobIdentity,
     candidates: list[ResearchCandidate],
 ) -> ResearchCandidate | None:
-    strong = [
-        candidate
-        for candidate in candidates
-        if _official_metadata_match(identity, candidate)
-    ]
+    strong = [candidate for candidate in candidates if _official_metadata_match(identity, candidate)]
     if not strong:
         return None
     return max(
@@ -275,13 +308,10 @@ def _package_from_verification(
         confidence=confidence or verification.confidence,
         basis=basis or verification.identity_basis,
         provenance=build_provenance(email),
-        official_job_url=(
-            verification.official_url if status == "verified_exact_job" else None
-        ),
+        official_job_url=(verification.official_url if status == "verified_exact_job" else None),
         secondary_evidence_urls=(
             [verification.matched_candidate_url]
-            if status == "secondary_corroborated"
-            and verification.matched_candidate_url
+            if status == "secondary_corroborated" and verification.matched_candidate_url
             else []
         ),
         application_url=verification.application_url or _application_url(candidates),
@@ -398,11 +428,7 @@ def _verify_official_candidates(
         )
 
     metadata_candidate = _best_strong_official_candidate(identity, exact)
-    if (
-        metadata_candidate
-        and _trusted_source(email)
-        and not _blocking_conflicts(identity, verification)
-    ):
+    if metadata_candidate and _trusted_source(email) and not _blocking_conflicts(identity, verification):
         return (
             _official_metadata_package(
                 identity=identity,
@@ -431,18 +457,28 @@ def research_concrete_job_or_delegate(
     email: EmailMessage,
 ) -> OpportunityResearchPackage:
     """Official-first concrete-job research with confidence-based early stopping."""
-    record_kind = infer_initial_record_kind(identity)
-    if record_kind != "job_posting":
-        return legacy_research_opportunity(identity, email)
-
     base_direct = _direct_candidates(identity)
     direct = _promote_brand_official_candidates(identity, base_direct)
 
-    # Preserve the already-tested direct-official path (e.g. IBM jobId URL).
+    # Preserve the sealed legacy direct-official path when the old classifier
+    # already recognized it (e.g. IBM jobId URLs).
     if any(
         item.tier == "official" and item.relation == "exact_posting"
         for item in base_direct
     ):
+        return legacy_research_opportunity(identity, email)
+
+    direct_exact = [
+        item
+        for item in direct
+        if item.tier == "official" and item.relation == "exact_posting"
+    ]
+
+    # Concrete official job-detail evidence outranks a generic word such as
+    # "Program" or "Academy" in the title. Without that evidence, keep legacy
+    # programme/event/challenge classification behaviour unchanged.
+    record_kind = "job_posting" if direct_exact else infer_initial_record_kind(identity)
+    if record_kind != "job_posting":
         return legacy_research_opportunity(identity, email)
 
     started = time.perf_counter()
@@ -453,6 +489,25 @@ def research_concrete_job_or_delegate(
     search_calls = 0
     fetch_calls = 0
     judge_llm_calls = 0
+
+    # If the trusted source already supplied a concrete official job-detail URL,
+    # verify it immediately. Successful verification/fallback means zero web search.
+    if direct_exact:
+        package, fetch_calls, judge_llm_calls, warnings, errors = _verify_official_candidates(
+            identity=identity,
+            email=email,
+            official=direct_exact,
+            candidates=candidates,
+            trace=trace,
+            search_calls=0,
+            fetch_calls=fetch_calls,
+            judge_llm_calls=judge_llm_calls,
+            warnings=warnings,
+            errors=errors,
+            started=started,
+        )
+        if package is not None:
+            return package
 
     # Round 1: exact employer/ATS title search.
     found, step, error = _search_round(

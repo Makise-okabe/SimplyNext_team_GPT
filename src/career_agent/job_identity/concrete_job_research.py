@@ -36,7 +36,6 @@ SENIORITY_WORDS = {
     "sr",
     "jr",
 }
-GENERIC_TITLE_WORDS = {"engineer", "manager", "developer", "analyst", "consultant"}
 COMPANY_ALIAS_STOPWORDS = {
     "the",
     "company",
@@ -54,6 +53,13 @@ COMPANY_ALIAS_STOPWORDS = {
 }
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 YEAR_PATTERN = re.compile(r"\b20\d{2}\b")
+
+# Round 1 may stop the search only when the candidate is already a strong,
+# official, job-like match. The score is not used alone: title and core-title
+# overlap must also clear their thresholds.
+EARLY_STOP_SCORE = 70.0
+EARLY_STOP_FULL_TITLE_OVERLAP = 0.80
+EARLY_STOP_CORE_TITLE_OVERLAP = 0.90
 
 
 def _clean_company(company: str | None) -> str:
@@ -84,12 +90,7 @@ def _core_title(title: str | None) -> str:
 
 
 def _company_host_aliases(company: str | None) -> set[str]:
-    """Derive conservative brand/domain aliases from a legal company name.
-
-    Example: `THE BOSTON CONSULTING GROUP` -> `bcg`. We keep ordinary meaningful
-    words too, while only generating acronyms of at least three characters to
-    avoid promoting unrelated two-letter domains.
-    """
+    """Derive conservative brand/domain aliases from a legal company name."""
     tokens = [
         token
         for token in TOKEN_PATTERN.findall((company or "").lower())
@@ -111,12 +112,7 @@ def _promote_brand_official_candidates(
     identity: JobIdentity,
     candidates: list[ResearchCandidate],
 ) -> list[ResearchCandidate]:
-    """Promote company-owned acronym domains missed by the base classifier.
-
-    Search still discovers the URL; this helper only fixes evidence ownership.
-    It never promotes known secondary/institutional results and requires an exact
-    host-token match to a company-derived alias such as `bcg` in `careers.bcg.com`.
-    """
+    """Promote a company-owned acronym domain missed by the base classifier."""
     aliases = _company_host_aliases(identity.company)
     if not aliases:
         return candidates
@@ -128,14 +124,20 @@ def _promote_brand_official_candidates(
             continue
 
         relation = "exact_posting" if _job_like_url(candidate.url) else "official_background"
-        reasons = [*candidate.reasons, "company brand/acronym matched official host"]
         promoted.append(
             candidate.model_copy(
                 update={
                     "tier": "official",
                     "relation": relation,
                     "score": min(100.0, candidate.score + 40.0),
-                    "reasons": list(dict.fromkeys(reasons)),
+                    "reasons": list(
+                        dict.fromkeys(
+                            [
+                                *candidate.reasons,
+                                "company brand/acronym matched official host",
+                            ]
+                        )
+                    ),
                 }
             )
         )
@@ -177,22 +179,38 @@ def _official_metadata_match(
     identity: JobIdentity,
     candidate: ResearchCandidate,
 ) -> bool:
-    """Conservative V5 fallback for strong official job-result metadata.
-
-    Normal V3 fetched-content verification always runs first. This fallback only
-    applies when that verification is inconclusive and the search result itself is
-    an official job-like page with strong title agreement. It is useful for
-    dynamic employer sites that expose the exact role in indexed metadata but do
-    not provide enough static body text for V3's stricter JD-content guardrails.
-    """
+    """Return True for a strong official job-result metadata match."""
     if candidate.tier != "official" or candidate.relation != "exact_posting":
         return False
-    if candidate.score < 70:
+    if candidate.score < EARLY_STOP_SCORE:
         return False
 
     full_overlap = _metadata_title_overlap(identity.title, candidate)
     core_overlap = _metadata_title_overlap(_core_title(identity.title), candidate)
-    return full_overlap >= 0.80 and core_overlap >= 0.90
+    return (
+        full_overlap >= EARLY_STOP_FULL_TITLE_OVERLAP
+        and core_overlap >= EARLY_STOP_CORE_TITLE_OVERLAP
+    )
+
+
+def _best_strong_official_candidate(
+    identity: JobIdentity,
+    candidates: list[ResearchCandidate],
+) -> ResearchCandidate | None:
+    strong = [
+        candidate
+        for candidate in candidates
+        if _official_metadata_match(identity, candidate)
+    ]
+    if not strong:
+        return None
+    return max(
+        strong,
+        key=lambda candidate: (
+            _metadata_title_overlap(identity.title, candidate),
+            candidate.score,
+        ),
+    )
 
 
 def _trusted_source(email: EmailMessage) -> bool:
@@ -202,11 +220,9 @@ def _trusted_source(email: EmailMessage) -> bool:
 def _blocking_conflicts(identity: JobIdentity, verification) -> list[str]:
     """Return only conflicts that should block the V5 metadata fallback.
 
-    V3 intentionally compares candidate recruiting years to the email receipt
-    year. That is conservative, but graduate recruiting commonly opens one year
-    early. If the source identity itself explicitly names the same future cycle
-    (e.g. a 2026 email for `Associate, Singapore (2027)`), the year difference is
-    corroborated rather than contradictory. Different candidate years still block.
+    A future recruiting year explicitly named by the source role is corroboration,
+    not a conflict with the email receipt year. A different candidate cycle still
+    blocks the fallback.
     """
     identity_years = set(YEAR_PATTERN.findall(identity.title or ""))
     blocking: list[str] = []
@@ -220,8 +236,67 @@ def _blocking_conflicts(identity: JobIdentity, verification) -> list[str]:
                     if candidate_years and candidate_years <= identity_years:
                         continue
             blocking.append(conflict)
-
     return blocking
+
+
+def _official_exact_query(identity: JobIdentity) -> str:
+    company = _clean_company(identity.company)
+    title = " ".join((identity.title or "").split())
+    location = identity.location or ""
+    return f'{company} careers "{title}" {location}'.strip()
+
+
+def _official_broad_query(identity: JobIdentity) -> str:
+    company = _clean_company(identity.company)
+    core_title = _core_title(identity.title)
+    location = identity.location or "Singapore"
+    return f'{company} careers "{core_title}" {location}'.strip()
+
+
+def _package_from_verification(
+    *,
+    identity: JobIdentity,
+    email: EmailMessage,
+    verification,
+    candidates: list[ResearchCandidate],
+    trace,
+    search_calls: int,
+    fetch_calls: int,
+    judge_llm_calls: int,
+    started: float,
+    status: str,
+    confidence: str | None = None,
+    basis: str | None = None,
+) -> OpportunityResearchPackage:
+    return OpportunityResearchPackage(
+        identity=identity,
+        record_kind="job_posting",
+        status=status,
+        confidence=confidence or verification.confidence,
+        basis=basis or verification.identity_basis,
+        provenance=build_provenance(email),
+        official_job_url=(
+            verification.official_url if status == "verified_exact_job" else None
+        ),
+        secondary_evidence_urls=(
+            [verification.matched_candidate_url]
+            if status == "secondary_corroborated"
+            and verification.matched_candidate_url
+            else []
+        ),
+        application_url=verification.application_url or _application_url(candidates),
+        candidates=candidates,
+        trace=trace,
+        evidence_summary=verification.matched_evidence,
+        warnings=list(dict.fromkeys(verification.warnings)),
+        errors=list(dict.fromkeys(verification.errors)),
+        metrics=ResearchMetrics(
+            search_calls=search_calls,
+            fetch_calls=fetch_calls,
+            judge_llm_calls=judge_llm_calls,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        ),
+    )
 
 
 def _official_metadata_package(
@@ -270,84 +345,104 @@ def _official_metadata_package(
     )
 
 
-def _official_exact_query(identity: JobIdentity) -> str:
-    company = _clean_company(identity.company)
-    title = " ".join((identity.title or "").split())
-    location = identity.location or ""
-    return f'{company} careers "{title}" {location}'.strip()
-
-
-def _official_broad_query(identity: JobIdentity) -> str:
-    company = _clean_company(identity.company)
-    core_title = _core_title(identity.title)
-    location = identity.location or "Singapore"
-    return f'{company} careers "{core_title}" {location}'.strip()
-
-
-def _package_from_verification(
+def _verify_official_candidates(
     *,
     identity: JobIdentity,
     email: EmailMessage,
-    verification,
-    candidates,
+    official: list[ResearchCandidate],
+    candidates: list[ResearchCandidate],
     trace,
     search_calls: int,
+    fetch_calls: int,
+    judge_llm_calls: int,
+    warnings: list[str],
+    errors: list[str],
     started: float,
-    status: str,
-    confidence: str | None = None,
-    basis: str | None = None,
-) -> OpportunityResearchPackage:
-    return OpportunityResearchPackage(
-        identity=identity,
-        record_kind="job_posting",
-        status=status,
-        confidence=confidence or verification.confidence,
-        basis=basis or verification.identity_basis,
-        provenance=build_provenance(email),
-        official_job_url=(
-            verification.official_url if status == "verified_exact_job" else None
-        ),
-        secondary_evidence_urls=(
-            [verification.matched_candidate_url]
-            if status == "secondary_corroborated" and verification.matched_candidate_url
-            else []
-        ),
-        application_url=verification.application_url or _application_url(candidates),
-        candidates=candidates,
-        trace=trace,
-        evidence_summary=verification.matched_evidence,
-        warnings=list(dict.fromkeys(verification.warnings)),
-        errors=list(dict.fromkeys(verification.errors)),
-        metrics=ResearchMetrics(
-            search_calls=search_calls,
-            fetch_calls=verification.metrics.fetch_calls,
-            judge_llm_calls=verification.metrics.llm_calls,
-            elapsed_ms=int((time.perf_counter() - started) * 1000),
-        ),
+) -> tuple[OpportunityResearchPackage | None, int, int, list[str], list[str]]:
+    """Verify exact official job candidates and apply the bounded V5 fallback."""
+    exact = [item for item in official if item.relation == "exact_posting"]
+    if not exact:
+        return None, fetch_calls, judge_llm_calls, warnings, errors
+
+    verification = verify_same_job(
+        identity,
+        _to_v3_discovery(exact),
+        email,
+        enable_llm_judge=True,
     )
+    fetch_calls += verification.metrics.fetch_calls
+    judge_llm_calls += verification.metrics.llm_calls
+    warnings = [*warnings, *verification.warnings]
+    errors = [*errors, *verification.errors]
+    verification.warnings = list(dict.fromkeys(warnings))
+    verification.errors = list(dict.fromkeys(errors))
+
+    if verification.identity_status == "verified":
+        return (
+            _package_from_verification(
+                identity=identity,
+                email=email,
+                verification=verification,
+                candidates=candidates,
+                trace=trace,
+                search_calls=search_calls,
+                fetch_calls=fetch_calls,
+                judge_llm_calls=judge_llm_calls,
+                started=started,
+                status="verified_exact_job",
+            ),
+            fetch_calls,
+            judge_llm_calls,
+            warnings,
+            errors,
+        )
+
+    metadata_candidate = _best_strong_official_candidate(identity, exact)
+    if (
+        metadata_candidate
+        and _trusted_source(email)
+        and not _blocking_conflicts(identity, verification)
+    ):
+        return (
+            _official_metadata_package(
+                identity=identity,
+                email=email,
+                candidate=metadata_candidate,
+                candidates=candidates,
+                trace=trace,
+                search_calls=search_calls,
+                fetch_calls=fetch_calls,
+                judge_llm_calls=judge_llm_calls,
+                warnings=warnings,
+                errors=errors,
+                started=started,
+            ),
+            fetch_calls,
+            judge_llm_calls,
+            warnings,
+            errors,
+        )
+
+    return None, fetch_calls, judge_llm_calls, warnings, errors
 
 
 def research_concrete_job_or_delegate(
     identity: JobIdentity,
     email: EmailMessage,
 ) -> OpportunityResearchPackage:
-    """Harden V5 concrete-job research while preserving programme behaviour.
-
-    Direct official links remain on the already-tested legacy path. Concrete jobs
-    without a direct employer link get two official search rounds before any
-    secondary source is allowed to participate.
-    """
+    """Official-first concrete-job research with confidence-based early stopping."""
     record_kind = infer_initial_record_kind(identity)
     if record_kind != "job_posting":
         return legacy_research_opportunity(identity, email)
 
-    direct = _promote_brand_official_candidates(identity, _direct_candidates(identity))
-    direct_official = [
-        item
-        for item in direct
-        if item.tier == "official" and item.relation == "exact_posting"
-    ]
-    if direct_official:
+    base_direct = _direct_candidates(identity)
+    direct = _promote_brand_official_candidates(identity, base_direct)
+
+    # Preserve the already-tested direct-official path (e.g. IBM jobId URL).
+    if any(
+        item.tier == "official" and item.relation == "exact_posting"
+        for item in base_direct
+    ):
         return legacy_research_opportunity(identity, email)
 
     started = time.perf_counter()
@@ -359,7 +454,7 @@ def research_concrete_job_or_delegate(
     fetch_calls = 0
     judge_llm_calls = 0
 
-    # Round 1: employer/ATS exact title.
+    # Round 1: exact employer/ATS title search.
     found, step, error = _search_round(
         identity,
         _official_exact_query(identity),
@@ -374,8 +469,33 @@ def research_concrete_job_or_delegate(
         errors.append(error)
     candidates = _merge_candidates([*candidates, *found])
 
-    # Round 2: still official, but tolerate employer title variants such as
-    # "Staff Analog Layout Engineer" vs "Senior Staff Analog Layout Engineer".
+    # EARLY STOP: if Round 1 already contains a strong official exact posting,
+    # verify only that exact candidate set now. Do not spend Round 2 unless the
+    # first result is too weak, ambiguous, or conflicted.
+    round1_exact = [
+        item
+        for item in found
+        if item.tier == "official" and item.relation == "exact_posting"
+    ]
+    if _best_strong_official_candidate(identity, round1_exact):
+        package, fetch_calls, judge_llm_calls, warnings, errors = _verify_official_candidates(
+            identity=identity,
+            email=email,
+            official=round1_exact,
+            candidates=candidates,
+            trace=trace,
+            search_calls=search_calls,
+            fetch_calls=fetch_calls,
+            judge_llm_calls=judge_llm_calls,
+            warnings=warnings,
+            errors=errors,
+            started=started,
+        )
+        if package is not None:
+            return package
+
+    # Round 2: only when Round 1 was not strong enough to finish safely. This
+    # broadens seniority/title variants while remaining official-first.
     found, step, error = _search_round(
         identity,
         _official_broad_query(identity),
@@ -391,57 +511,23 @@ def research_concrete_job_or_delegate(
     candidates = _merge_candidates([*candidates, *found])
 
     official = [item for item in candidates if item.tier == "official"]
-    if official:
-        verification = verify_same_job(
-            identity,
-            _to_v3_discovery(official),
-            email,
-            enable_llm_judge=True,
-        )
-        fetch_calls += verification.metrics.fetch_calls
-        judge_llm_calls += verification.metrics.llm_calls
-        warnings.extend(verification.warnings)
-        errors.extend(verification.errors)
-        verification.errors = list(dict.fromkeys([*verification.errors, *errors]))
-        verification.warnings = list(dict.fromkeys([*verification.warnings, *warnings]))
-        if verification.identity_status == "verified":
-            package = _package_from_verification(
-                identity=identity,
-                email=email,
-                verification=verification,
-                candidates=candidates,
-                trace=trace,
-                search_calls=search_calls,
-                started=started,
-                status="verified_exact_job",
-            )
-            package.metrics.fetch_calls = fetch_calls
-            package.metrics.judge_llm_calls = judge_llm_calls
-            return package
+    package, fetch_calls, judge_llm_calls, warnings, errors = _verify_official_candidates(
+        identity=identity,
+        email=email,
+        official=official,
+        candidates=candidates,
+        trace=trace,
+        search_calls=search_calls,
+        fetch_calls=fetch_calls,
+        judge_llm_calls=judge_llm_calls,
+        warnings=warnings,
+        errors=errors,
+        started=started,
+    )
+    if package is not None:
+        return package
 
-        # Keep sealed V3 conservative. V5 may still accept a bounded metadata
-        # match when the trusted source and a strong official job result agree and
-        # V3 observed no genuine identifier/year conflict.
-        metadata_candidate = next(
-            (candidate for candidate in official if _official_metadata_match(identity, candidate)),
-            None,
-        )
-        if metadata_candidate and _trusted_source(email) and not _blocking_conflicts(identity, verification):
-            return _official_metadata_package(
-                identity=identity,
-                email=email,
-                candidate=metadata_candidate,
-                candidates=candidates,
-                trace=trace,
-                search_calls=search_calls,
-                fetch_calls=fetch_calls,
-                judge_llm_calls=judge_llm_calls,
-                warnings=warnings,
-                errors=errors,
-                started=started,
-            )
-
-    # Round 3: only after both official attempts fail to verify the same job.
+    # Round 3: secondary evidence is allowed only after official attempts fail.
     found, step, error = _search_round(
         identity,
         _secondary_query(identity),
@@ -456,59 +542,25 @@ def research_concrete_job_or_delegate(
         errors.append(error)
     candidates = _merge_candidates([*candidates, *found])
 
-    # A supposedly secondary search can still surface an employer page. Give any
-    # newly discovered official page one verification chance before aggregators.
+    # A secondary query can occasionally surface the employer page. Give that
+    # newly discovered official result one chance before aggregators.
     newly_official = [item for item in found if item.tier == "official"]
     if newly_official:
-        verification = verify_same_job(
-            identity,
-            _to_v3_discovery(newly_official),
-            email,
-            enable_llm_judge=True,
+        package, fetch_calls, judge_llm_calls, warnings, errors = _verify_official_candidates(
+            identity=identity,
+            email=email,
+            official=newly_official,
+            candidates=candidates,
+            trace=trace,
+            search_calls=search_calls,
+            fetch_calls=fetch_calls,
+            judge_llm_calls=judge_llm_calls,
+            warnings=warnings,
+            errors=errors,
+            started=started,
         )
-        fetch_calls += verification.metrics.fetch_calls
-        judge_llm_calls += verification.metrics.llm_calls
-        warnings.extend(verification.warnings)
-        errors.extend(verification.errors)
-        if verification.identity_status == "verified":
-            verification.errors = list(dict.fromkeys([*verification.errors, *errors]))
-            verification.warnings = list(dict.fromkeys([*verification.warnings, *warnings]))
-            package = _package_from_verification(
-                identity=identity,
-                email=email,
-                verification=verification,
-                candidates=candidates,
-                trace=trace,
-                search_calls=search_calls,
-                started=started,
-                status="verified_exact_job",
-            )
-            package.metrics.fetch_calls = fetch_calls
-            package.metrics.judge_llm_calls = judge_llm_calls
+        if package is not None:
             return package
-
-        metadata_candidate = next(
-            (
-                candidate
-                for candidate in newly_official
-                if _official_metadata_match(identity, candidate)
-            ),
-            None,
-        )
-        if metadata_candidate and _trusted_source(email) and not _blocking_conflicts(identity, verification):
-            return _official_metadata_package(
-                identity=identity,
-                email=email,
-                candidate=metadata_candidate,
-                candidates=candidates,
-                trace=trace,
-                search_calls=search_calls,
-                fetch_calls=fetch_calls,
-                judge_llm_calls=judge_llm_calls,
-                warnings=warnings,
-                errors=errors,
-                started=started,
-            )
 
     secondary = [
         item for item in candidates if item.tier in {"secondary", "institutional"}
@@ -524,41 +576,60 @@ def research_concrete_job_or_delegate(
         judge_llm_calls += verification.metrics.llm_calls
         warnings.extend(verification.warnings)
         errors.extend(verification.errors)
-        verification.errors = list(dict.fromkeys([*verification.errors, *errors]))
-        verification.warnings = list(dict.fromkeys([*verification.warnings, *warnings]))
+        verification.warnings = list(dict.fromkeys(warnings))
+        verification.errors = list(dict.fromkeys(errors))
         if verification.identity_status == "verified":
-            package = _package_from_verification(
+            return _package_from_verification(
                 identity=identity,
                 email=email,
                 verification=verification,
                 candidates=candidates,
                 trace=trace,
                 search_calls=search_calls,
+                fetch_calls=fetch_calls,
+                judge_llm_calls=judge_llm_calls,
                 started=started,
                 status="secondary_corroborated",
                 confidence="medium",
                 basis="secondary_same_job_evidence",
             )
-            package.metrics.fetch_calls = fetch_calls
-            package.metrics.judge_llm_calls = judge_llm_calls
-            return package
 
-    # NUS source still establishes that the opportunity was genuinely circulated,
-    # but for a concrete job this is not the same as current exact-job verification.
+    if _trusted_source(email):
+        return OpportunityResearchPackage(
+            identity=identity,
+            record_kind="job_posting",
+            status="source_verified",
+            confidence="medium",
+            basis="trusted_nus_email",
+            provenance=build_provenance(email),
+            secondary_evidence_urls=[item.url for item in secondary[:3]],
+            application_url=_application_url(candidates),
+            candidates=candidates,
+            trace=trace,
+            evidence_summary=[
+                "trusted NUS career source confirms the role was circulated; exact current employer posting was not verified"
+            ],
+            warnings=list(dict.fromkeys(warnings)),
+            errors=list(dict.fromkeys(errors)),
+            metrics=ResearchMetrics(
+                search_calls=search_calls,
+                fetch_calls=fetch_calls,
+                judge_llm_calls=judge_llm_calls,
+                elapsed_ms=int((time.perf_counter() - started) * 1000),
+            ),
+        )
+
     return OpportunityResearchPackage(
         identity=identity,
         record_kind="job_posting",
-        status="source_verified",
-        confidence="medium",
-        basis="trusted_nus_email",
+        status="unresolved",
+        confidence="low",
+        basis="none",
         provenance=build_provenance(email),
         secondary_evidence_urls=[item.url for item in secondary[:3]],
         application_url=_application_url(candidates),
         candidates=candidates,
         trace=trace,
-        evidence_summary=[
-            "trusted NUS career source confirms the role was circulated; exact current employer posting was not verified"
-        ],
         warnings=list(dict.fromkeys(warnings)),
         errors=list(dict.fromkeys(errors)),
         metrics=ResearchMetrics(

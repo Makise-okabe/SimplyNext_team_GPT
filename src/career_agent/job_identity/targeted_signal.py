@@ -30,7 +30,7 @@ def _dedupe(values: list[str]) -> list[str]:
     return result
 
 
-def _find_target_container(html: str, title: str, company: str | None) -> tuple[str, list[str]]:
+def _find_target_container(html: str, title: str) -> tuple[str, list[str]]:
     if not html or not title:
         return "", []
 
@@ -46,11 +46,6 @@ def _find_target_container(html: str, title: str, company: str | None) -> tuple[
         return "", []
 
     text = _clean(unescape(container.get_text(" ", strip=True)))
-    if company and company.lower() not in text.lower():
-        # Some newsletter tables use rowspan for the company cell. Keep the
-        # exact-title row anyway; title identity is stronger than repeated company text.
-        pass
-
     links = [anchor.get("href", "").strip() for anchor in container.find_all("a", href=True)]
     return text, _dedupe(links)
 
@@ -99,7 +94,6 @@ def _infer_location(context: str) -> str | None:
     if not match:
         return None
     value = _clean(match.group(1)).strip(" .,-")
-    # Stop before common row/remark words accidentally swallowed by loose HTML text.
     value = re.split(r"(?i)\b(?:deadline|apply|full-time|full time|ug|pg)\b", value)[0]
     return _clean(value) or None
 
@@ -111,24 +105,22 @@ def build_targeted_signal(
 ) -> OpportunitySignal | None:
     """Deterministically recover one explicitly requested newsletter role.
 
-    This is a guardrail for dense multi-role emails where generic LLM extraction
-    may omit a row. Exact title presence is required; the function never invents
-    a role that is absent from the source.
+    Exact title presence is mandatory. The nearest HTML row is preferred so a
+    target role inherits only its own hyperlink instead of neighbouring jobs.
     """
     if not company or not title:
         return None
 
     full_text = email.body_text or ""
-    if title.lower() not in full_text.lower() and title.lower() not in (email.body_html or "").lower():
+    html = email.body_html or ""
+    if title.lower() not in full_text.lower() and title.lower() not in html.lower():
         return None
 
-    row_text, row_links = _find_target_container(email.body_html, title, company)
+    row_text, row_links = _find_target_container(html, title)
     context = row_text or _text_window(full_text, title)
     if not context:
         return None
 
-    # Prefer links from the exact HTML row. Only if markup association is lost do
-    # we fall back to company-domain links from the normalized email.
     urls = row_links or _company_host_links(email, company)
 
     return OpportunitySignal(

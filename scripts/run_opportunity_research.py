@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 
 from career_agent.connectors.outlook_graph import OutlookGraphConnector
+from career_agent.job_identity.email_targeting import select_target_messages
 from career_agent.job_identity.extract_identity import extract_job_identities
 from career_agent.job_identity.official_research import (
     focus_email_for_target,
     research_opportunity,
 )
+from career_agent.job_identity.targeted_signal import build_targeted_signal
 from career_agent.nodes.extract_signal import extract_signal
 from career_agent.nodes.normalize_email import normalize_email
 
@@ -35,19 +37,28 @@ def main() -> None:
     args = parser.parse_args()
 
     connector = OutlookGraphConnector()
-    messages = connector.get_messages(top=args.scan, include_attachments=True)
-    if args.subject:
-        needle = args.subject.lower()
-        messages = [message for message in messages if needle in message.subject.lower()]
-    messages = messages[: args.limit]
+    all_messages = connector.get_messages(top=args.scan, include_attachments=True)
+    messages = select_target_messages(
+        all_messages,
+        company=args.company,
+        title=args.title,
+        subject_hint=args.subject,
+        limit=args.limit,
+    )
 
     print("=" * 108)
     print("SIMPLYNEXT V5 — OFFICIAL-FIRST OPPORTUNITY RESEARCH + PROVENANCE")
     print("=" * 108)
+    print("Career emails scanned :", len(all_messages))
     print("Career emails selected:", len(messages))
 
     if not messages:
-        raise RuntimeError("No matching career emails found.")
+        target = " / ".join(value for value in (args.company, args.title) if value)
+        raise RuntimeError(
+            "No mailbox email contains the requested target"
+            + (f": {target}" if target else ".")
+            + " Increase --scan if the email is older."
+        )
 
     for email_index, message in enumerate(messages, start=1):
         normalized = normalize_email(message)
@@ -71,6 +82,17 @@ def main() -> None:
             and _matches(signal.get("role_title"), args.title)
         ]
 
+        fallback_used = False
+        if not signals and args.company and args.title:
+            targeted = build_targeted_signal(
+                normalized,
+                company=args.company,
+                title=args.title,
+            )
+            if targeted is not None:
+                signals = [targeted.model_dump(mode="json")]
+                fallback_used = True
+
         identities = extract_job_identities(focused, signals)
 
         print("\n" + "-" * 108)
@@ -80,7 +102,18 @@ def main() -> None:
         print("Target company:", args.company or "<all>")
         print("Target title  :", args.title or "<all>")
         print("Signals       :", len(signals))
+        print("Signal source :", "deterministic target fallback" if fallback_used else "generic extractor")
         print("Identities    :", len(identities.identities))
+
+        extraction_errors = signal_result.get("errors", [])
+        if extraction_errors:
+            print("\n  EXTRACTION DIAGNOSTICS")
+            for error in extraction_errors:
+                print("   -", error)
+
+        if not signals:
+            print("\n  TARGET FOUND IN EMAIL, BUT EXTRACTION RETURNED ZERO SIGNALS")
+            print("  Generic extraction and deterministic target fallback both failed.")
 
         for index, identity in enumerate(identities.identities, start=1):
             package = research_opportunity(identity, normalized)
@@ -121,24 +154,15 @@ def main() -> None:
             print("    basis       :", package.basis)
             print("    confidence  :", package.confidence)
             print("    official job:", package.official_job_url)
-            print(
-                "    official bg :",
-                "; ".join(package.official_background_urls) or "None",
-            )
-            print(
-                "    secondary   :",
-                "; ".join(package.secondary_evidence_urls) or "None",
-            )
+            print("    official bg :", "; ".join(package.official_background_urls) or "None")
+            print("    secondary   :", "; ".join(package.secondary_evidence_urls) or "None")
             print("    apply       :", package.application_url)
 
             print("\n  ORIGINAL SOURCE")
             print("    sender      :", package.provenance.sender_email)
             print("    subject     :", _short(package.provenance.subject, 150))
             print("    Outlook link:", package.provenance.original_email_url)
-            print(
-                "    attachments :",
-                "; ".join(package.provenance.attachment_names) or "None",
-            )
+            print("    attachments :", "; ".join(package.provenance.attachment_names) or "None")
 
             print("\n  METRICS")
             print("    web searches:", package.metrics.search_calls)

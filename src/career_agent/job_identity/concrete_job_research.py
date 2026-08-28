@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import re
 import time
+from urllib.parse import urlparse
 
 from career_agent.job_identity.official_research import (
     _application_url,
     _direct_candidates,
+    _job_like_url,
     _merge_candidates,
     _search_round,
     _secondary_query,
@@ -18,6 +21,7 @@ from career_agent.models.email import EmailMessage
 from career_agent.models.job_identity import JobIdentity
 from career_agent.models.opportunity_research import (
     OpportunityResearchPackage,
+    ResearchCandidate,
     ResearchMetrics,
 )
 
@@ -32,6 +36,22 @@ SENIORITY_WORDS = {
     "jr",
 }
 GENERIC_TITLE_WORDS = {"engineer", "manager", "developer", "analyst", "consultant"}
+COMPANY_ALIAS_STOPWORDS = {
+    "the",
+    "company",
+    "limited",
+    "ltd",
+    "pte",
+    "inc",
+    "corp",
+    "corporation",
+    "private",
+    "asia",
+    "singapore",
+    "holdings",
+    "holding",
+}
+TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 
 
 def _clean_company(company: str | None) -> str:
@@ -59,6 +79,72 @@ def _core_title(title: str | None) -> str:
     if len(kept) >= 2:
         return " ".join(kept)
     return " ".join(tokens)
+
+
+def _company_host_aliases(company: str | None) -> set[str]:
+    """Derive conservative brand/domain aliases from a legal company name.
+
+    Example: `THE BOSTON CONSULTING GROUP` -> `bcg`. We keep ordinary meaningful
+    words too, while only generating acronyms of at least three characters to
+    avoid promoting unrelated two-letter domains.
+    """
+    tokens = [
+        token
+        for token in TOKEN_PATTERN.findall((company or "").lower())
+        if token not in COMPANY_ALIAS_STOPWORDS
+    ]
+    aliases = {token for token in tokens if len(token) >= 3}
+    if len(tokens) >= 2:
+        acronym = "".join(token[0] for token in tokens if token)
+        if len(acronym) >= 3:
+            aliases.add(acronym)
+    return aliases
+
+
+def _host_tokens(host: str) -> set[str]:
+    return set(TOKEN_PATTERN.findall(host.lower()))
+
+
+def _promote_brand_official_candidates(
+    identity: JobIdentity,
+    candidates: list[ResearchCandidate],
+) -> list[ResearchCandidate]:
+    """Promote company-owned acronym domains missed by the base classifier.
+
+    Search still discovers the URL; this helper only fixes evidence ownership.
+    It never promotes known secondary/institutional results and requires an exact
+    host-token match to a company-derived alias such as `bcg` in `careers.bcg.com`.
+    """
+    aliases = _company_host_aliases(identity.company)
+    if not aliases:
+        return candidates
+
+    promoted: list[ResearchCandidate] = []
+    for candidate in candidates:
+        if candidate.tier != "weak" or not (aliases & _host_tokens(candidate.host)):
+            promoted.append(candidate)
+            continue
+
+        relation = "exact_posting" if _job_like_url(candidate.url) else "official_background"
+        reasons = [*candidate.reasons, "company brand/acronym matched official host"]
+        promoted.append(
+            candidate.model_copy(
+                update={
+                    "tier": "official",
+                    "relation": relation,
+                    "score": min(100.0, candidate.score + 40.0),
+                    "reasons": list(dict.fromkeys(reasons)),
+                }
+            )
+        )
+    return promoted
+
+
+def _refresh_trace_counts(step, candidates: list[ResearchCandidate]) -> None:
+    step.official_results = sum(1 for item in candidates if item.tier == "official")
+    step.secondary_results = sum(
+        1 for item in candidates if item.tier in {"secondary", "institutional"}
+    )
 
 
 def _official_exact_query(identity: JobIdentity) -> str:
@@ -132,7 +218,7 @@ def research_concrete_job_or_delegate(
     if record_kind != "job_posting":
         return legacy_research_opportunity(identity, email)
 
-    direct = _direct_candidates(identity)
+    direct = _promote_brand_official_candidates(identity, _direct_candidates(identity))
     direct_official = [
         item
         for item in direct
@@ -145,7 +231,10 @@ def research_concrete_job_or_delegate(
     candidates = direct
     trace = []
     errors: list[str] = []
+    warnings: list[str] = []
     search_calls = 0
+    fetch_calls = 0
+    judge_llm_calls = 0
 
     # Round 1: employer/ATS exact title.
     found, step, error = _search_round(
@@ -154,6 +243,8 @@ def research_concrete_job_or_delegate(
         1,
         "official",
     )
+    found = _promote_brand_official_candidates(identity, found)
+    _refresh_trace_counts(step, found)
     search_calls += 1
     trace.append(step)
     if error:
@@ -168,6 +259,8 @@ def research_concrete_job_or_delegate(
         2,
         "official",
     )
+    found = _promote_brand_official_candidates(identity, found)
+    _refresh_trace_counts(step, found)
     search_calls += 1
     trace.append(step)
     if error:
@@ -182,9 +275,14 @@ def research_concrete_job_or_delegate(
             email,
             enable_llm_judge=True,
         )
-        verification.errors.extend(errors)
+        fetch_calls += verification.metrics.fetch_calls
+        judge_llm_calls += verification.metrics.llm_calls
+        warnings.extend(verification.warnings)
+        errors.extend(verification.errors)
+        verification.errors = list(dict.fromkeys([*verification.errors, *errors]))
+        verification.warnings = list(dict.fromkeys([*verification.warnings, *warnings]))
         if verification.identity_status == "verified":
-            return _package_from_verification(
+            package = _package_from_verification(
                 identity=identity,
                 email=email,
                 verification=verification,
@@ -194,6 +292,9 @@ def research_concrete_job_or_delegate(
                 started=started,
                 status="verified_exact_job",
             )
+            package.metrics.fetch_calls = fetch_calls
+            package.metrics.judge_llm_calls = judge_llm_calls
+            return package
 
     # Round 3: only after both official attempts fail to verify the same job.
     found, step, error = _search_round(
@@ -202,11 +303,44 @@ def research_concrete_job_or_delegate(
         3,
         "secondary",
     )
+    found = _promote_brand_official_candidates(identity, found)
+    _refresh_trace_counts(step, found)
     search_calls += 1
     trace.append(step)
     if error:
         errors.append(error)
     candidates = _merge_candidates([*candidates, *found])
+
+    # A supposedly secondary search can still surface an employer page. Give any
+    # newly discovered official page one verification chance before aggregators.
+    newly_official = [item for item in found if item.tier == "official"]
+    if newly_official:
+        verification = verify_same_job(
+            identity,
+            _to_v3_discovery(newly_official),
+            email,
+            enable_llm_judge=True,
+        )
+        fetch_calls += verification.metrics.fetch_calls
+        judge_llm_calls += verification.metrics.llm_calls
+        warnings.extend(verification.warnings)
+        errors.extend(verification.errors)
+        if verification.identity_status == "verified":
+            verification.errors = list(dict.fromkeys([*verification.errors, *errors]))
+            verification.warnings = list(dict.fromkeys([*verification.warnings, *warnings]))
+            package = _package_from_verification(
+                identity=identity,
+                email=email,
+                verification=verification,
+                candidates=candidates,
+                trace=trace,
+                search_calls=search_calls,
+                started=started,
+                status="verified_exact_job",
+            )
+            package.metrics.fetch_calls = fetch_calls
+            package.metrics.judge_llm_calls = judge_llm_calls
+            return package
 
     secondary = [
         item for item in candidates if item.tier in {"secondary", "institutional"}
@@ -218,9 +352,14 @@ def research_concrete_job_or_delegate(
             email,
             enable_llm_judge=True,
         )
-        verification.errors.extend(errors)
+        fetch_calls += verification.metrics.fetch_calls
+        judge_llm_calls += verification.metrics.llm_calls
+        warnings.extend(verification.warnings)
+        errors.extend(verification.errors)
+        verification.errors = list(dict.fromkeys([*verification.errors, *errors]))
+        verification.warnings = list(dict.fromkeys([*verification.warnings, *warnings]))
         if verification.identity_status == "verified":
-            return _package_from_verification(
+            package = _package_from_verification(
                 identity=identity,
                 email=email,
                 verification=verification,
@@ -232,6 +371,9 @@ def research_concrete_job_or_delegate(
                 confidence="medium",
                 basis="secondary_same_job_evidence",
             )
+            package.metrics.fetch_calls = fetch_calls
+            package.metrics.judge_llm_calls = judge_llm_calls
+            return package
 
     # NUS source still establishes that the opportunity was genuinely circulated,
     # but for a concrete job this is not the same as current exact-job verification.
@@ -249,9 +391,12 @@ def research_concrete_job_or_delegate(
         evidence_summary=[
             "trusted NUS career source confirms the role was circulated; exact current employer posting was not verified"
         ],
+        warnings=list(dict.fromkeys(warnings)),
         errors=list(dict.fromkeys(errors)),
         metrics=ResearchMetrics(
             search_calls=search_calls,
+            fetch_calls=fetch_calls,
+            judge_llm_calls=judge_llm_calls,
             elapsed_ms=int((time.perf_counter() - started) * 1000),
         ),
     )

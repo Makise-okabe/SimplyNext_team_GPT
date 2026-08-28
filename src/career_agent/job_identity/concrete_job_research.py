@@ -53,6 +53,7 @@ COMPANY_ALIAS_STOPWORDS = {
     "holding",
 }
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+YEAR_PATTERN = re.compile(r"\b20\d{2}\b")
 
 
 def _clean_company(company: str | None) -> str:
@@ -198,12 +199,29 @@ def _trusted_source(email: EmailMessage) -> bool:
     return (email.sender_email or "").strip().lower() in Settings().trusted_senders
 
 
-def _hard_conflicts(verification) -> list[str]:
-    return [
-        conflict
-        for evaluation in verification.evaluations
-        for conflict in evaluation.hard_conflicts
-    ]
+def _blocking_conflicts(identity: JobIdentity, verification) -> list[str]:
+    """Return only conflicts that should block the V5 metadata fallback.
+
+    V3 intentionally compares candidate recruiting years to the email receipt
+    year. That is conservative, but graduate recruiting commonly opens one year
+    early. If the source identity itself explicitly names the same future cycle
+    (e.g. a 2026 email for `Associate, Singapore (2027)`), the year difference is
+    corroborated rather than contradictory. Different candidate years still block.
+    """
+    identity_years = set(YEAR_PATTERN.findall(identity.title or ""))
+    blocking: list[str] = []
+
+    for evaluation in verification.evaluations:
+        for conflict in evaluation.hard_conflicts:
+            if conflict.startswith("recruiting-cycle conflict:") and identity_years:
+                candidate_part = conflict.split("candidate title year(s)=", 1)
+                if len(candidate_part) == 2:
+                    candidate_years = set(YEAR_PATTERN.findall(candidate_part[1]))
+                    if candidate_years and candidate_years <= identity_years:
+                        continue
+            blocking.append(conflict)
+
+    return blocking
 
 
 def _official_metadata_package(
@@ -403,12 +421,12 @@ def research_concrete_job_or_delegate(
 
         # Keep sealed V3 conservative. V5 may still accept a bounded metadata
         # match when the trusted source and a strong official job result agree and
-        # V3 observed no hard identifier/year conflict.
+        # V3 observed no genuine identifier/year conflict.
         metadata_candidate = next(
             (candidate for candidate in official if _official_metadata_match(identity, candidate)),
             None,
         )
-        if metadata_candidate and _trusted_source(email) and not _hard_conflicts(verification):
+        if metadata_candidate and _trusted_source(email) and not _blocking_conflicts(identity, verification):
             return _official_metadata_package(
                 identity=identity,
                 email=email,
@@ -477,7 +495,7 @@ def research_concrete_job_or_delegate(
             ),
             None,
         )
-        if metadata_candidate and _trusted_source(email) and not _hard_conflicts(verification):
+        if metadata_candidate and _trusted_source(email) and not _blocking_conflicts(identity, verification):
             return _official_metadata_package(
                 identity=identity,
                 email=email,

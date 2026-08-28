@@ -29,8 +29,6 @@ APPLICATION_FORM_HOSTS = {
     "www.airtable.com",
 }
 
-# These are transport/navigation links that appear in forwarded Outlook email,
-# not evidence for the identity of an employer job posting.
 NOISE_DIRECT_HOSTS = {
     "outlook.live.com",
     "outlook.office.com",
@@ -59,6 +57,11 @@ ATS_HOST_HINTS = (
     "icims.com",
     "eightfold.ai",
 )
+
+UNIVERSITY_SOURCE_HOSTS = {
+    "careeraxis.ntu.edu.sg",
+    "nus-csm.symplicity.com",
+}
 
 GENERIC_WORDS = {
     "and",
@@ -112,17 +115,16 @@ def _classify_url(url: str) -> str:
 
     if host in APPLICATION_FORM_HOSTS:
         return "application_form"
+    if host in UNIVERSITY_SOURCE_HOSTS or host.endswith(".nus.edu.sg") or host.endswith(".ntu.edu.sg"):
+        return "source_page"
     if any(hint in host for hint in AGGREGATOR_HOST_HINTS):
         return "aggregator"
     if any(hint in host for hint in ATS_HOST_HINTS):
         return "employer_or_ats"
-    if host.endswith("nus.edu.sg"):
-        return "source_page"
     return "unknown"
 
 
 def _metadata_query(identity: JobIdentity) -> str:
-    """Prefer a discriminative named unit over an over-quoted full job title."""
     company = _search_company(identity)
     unit = _without_parenthetical(identity.business_unit)
     title = _without_parenthetical(identity.title)
@@ -148,8 +150,6 @@ def _best_distinctive_phrase(identity: JobIdentity) -> str | None:
     title = _without_parenthetical(identity.title).lower()
     unit = _without_parenthetical(identity.business_unit).lower()
 
-    # Do not repeat the title/business unit in round 2; search for a second,
-    # independently distinctive fingerprint from the JD.
     for phrase in identity.distinctive_phrases:
         cleaned = _without_parenthetical(phrase)
         lowered = cleaned.lower()
@@ -173,7 +173,6 @@ def _distinctive_query(identity: JobIdentity) -> str | None:
 
 
 def build_progressive_queries(identity: JobIdentity) -> list[tuple[str, str]]:
-    """Build deterministic search rounds from strongest to weaker evidence."""
     queries: list[tuple[str, str]] = []
     identifier = _identifier_query(identity)
     if identifier:
@@ -246,6 +245,9 @@ def _score_result(identity: JobIdentity, result: SearchResult, strategy: str) ->
     elif url_kind == "aggregator":
         score -= 6
         reasons.append("aggregator host")
+    elif url_kind == "source_page":
+        score -= 2
+        reasons.append("university/source page, not employer-controlled")
     elif url_kind == "application_form":
         score -= 3
         reasons.append("application form, not identity proof")
@@ -274,12 +276,7 @@ def _merge_candidate(existing: SearchCandidate, incoming: SearchCandidate) -> Se
             "discovery_score": max(existing.discovery_score, incoming.discovery_score),
             "strategies": list(dict.fromkeys([*existing.strategies, *incoming.strategies])),
             "identifier_hits": list(dict.fromkeys([*existing.identifier_hits, *incoming.identifier_hits])),
-            "distinctive_phrase_hits": list(
-                dict.fromkeys([
-                    *existing.distinctive_phrase_hits,
-                    *incoming.distinctive_phrase_hits,
-                ])
-            ),
+            "distinctive_phrase_hits": list(dict.fromkeys([*existing.distinctive_phrase_hits, *incoming.distinctive_phrase_hits])),
             "metadata_hits": list(dict.fromkeys([*existing.metadata_hits, *incoming.metadata_hits])),
             "reasons": list(dict.fromkeys([*existing.reasons, *incoming.reasons])),
         }
@@ -313,18 +310,10 @@ def _direct_candidates(identity: JobIdentity) -> dict[str, SearchCandidate]:
 
 
 def _strong_identifier_candidate(candidates: dict[str, SearchCandidate]) -> bool:
-    return any(
-        candidate.identifier_hits and candidate.discovery_score >= 65
-        for candidate in candidates.values()
-    )
+    return any(candidate.identifier_hits and candidate.discovery_score >= 65 for candidate in candidates.values())
 
 
 def discover_candidates(identity: JobIdentity) -> CandidateDiscoveryResult:
-    """V2 progressive candidate discovery with strict search/candidate budgets.
-
-    This function does NOT decide whether candidates are the same job. V3 owns
-    that decision. V2 only returns a small, ranked evidence set worth comparing.
-    """
     started = time.perf_counter()
     candidates = _direct_candidates(identity)
     trace: list[SearchTraceStep] = []
@@ -368,7 +357,6 @@ def discover_candidates(identity: JobIdentity) -> CandidateDiscoveryResult:
             if strategy == "exact_identifier" and _strong_identifier_candidate(candidates):
                 stopped_reason = "strong_identifier_candidate_found"
                 break
-
             if search_calls >= MAX_SEARCH_ROUNDS:
                 stopped_reason = "max_search_rounds_reached"
                 break

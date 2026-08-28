@@ -97,6 +97,7 @@ def main() -> None:
                         f"confidence={evaluation.confidence}"
                     )
                     print("      url      :", evaluation.final_url or evaluation.requested_url)
+                    print("      kind     :", evaluation.url_kind)
                     print("      title    :", _short(evaluation.page_title, 120))
                     print("      company  :", evaluation.company_match)
                     print("      title ov.:", f"{evaluation.title_overlap:.2f}")
@@ -110,7 +111,7 @@ def main() -> None:
                     if evaluation.hard_conflicts:
                         print("      CONFLICTS:", "; ".join(evaluation.hard_conflicts))
                     if evaluation.fetch_error:
-                        print("      fetch err:", evaluation.fetch_error)
+                        print("      unavailable:", evaluation.fetch_error)
             else:
                 print("    No public page was readable enough to evaluate.")
 
@@ -130,10 +131,17 @@ def main() -> None:
             print("    V3 judge LLM calls   :", result.metrics.llm_calls)
             print("    V3 latency           :", f"{result.metrics.elapsed_ms} ms")
 
+            if result.warnings:
+                print("\n  WARNINGS (NON-FATAL)")
+                for warning in result.warnings:
+                    print("   -", warning)
+
             if result.errors:
                 print("\n  ERRORS")
                 for error in result.errors:
                     print("   -", error)
+            else:
+                print("\n  Pipeline errors: 0")
 
 
 if __name__ == "__main__":

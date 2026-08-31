@@ -48,6 +48,14 @@ def _fragment_text_with_links(fragment) -> str:
     clone = BeautifulSoup(str(fragment), "html.parser")
     for tag in clone(["script", "style", "noscript", "svg"]):
         tag.decompose()
+
+    # Outlook often encodes multiple roles/TC IDs as HTML ordered lists. Plain
+    # BeautifulSoup get_text() drops the visible numbering, which makes one table
+    # row impossible to deterministically expand back into one role per record.
+    for ordered in clone.find_all("ol"):
+        for index, item in enumerate(ordered.find_all("li", recursive=False), start=1):
+            item.insert(0, NavigableString(f"{index}. "))
+
     for anchor in clone.find_all("a", href=True):
         href = anchor.get("href", "").strip()
         label = " ".join(anchor.get_text(" ", strip=True).split())

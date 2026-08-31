@@ -34,13 +34,21 @@ def test_rich_html_source_preserves_anchor_url_without_duplicate_plain_body(monk
     assert warnings == []
 
 
-def test_linked_pdf_is_added_as_source_document(monkeypatch) -> None:
+def test_linked_pdf_pages_are_emitted_as_separate_source_documents(monkeypatch) -> None:
     pdf_url = "https://nus.edu.sg/cfg/docs/enews.pdf"
     job_url = "https://careers.example.com/job/12345"
+    pages = [
+        "[[SIMPLYNEXT_PDF_PAGE_START:1]]\nMastercard Graduate Analyst\n[[SIMPLYNEXT_PDF_PAGE_END]]",
+        (
+            "[[SIMPLYNEXT_PDF_PAGE_START:2]]\nPoint72 Academy Internship\n"
+            "[[SIMPLYNEXT_PDF_PAGE_LINKS]]\n"
+            f"<{job_url}>\n[[SIMPLYNEXT_PDF_PAGE_END]]"
+        ),
+    ]
     monkeypatch.setattr(
         batch_sources,
         "_fetch_linked_pdf",
-        lambda url: ("Mastercard Graduate Analyst", [job_url]),
+        lambda url: (pages, [job_url]),
     )
 
     email = EmailMessage(
@@ -53,8 +61,11 @@ def test_linked_pdf_is_added_as_source_document(monkeypatch) -> None:
     corpus, links, documents, warnings = batch_sources.build_source_corpus(email)
 
     assert "Mastercard Graduate Analyst" in corpus
+    assert "Point72 Academy Internship" in corpus
     assert job_url in corpus
     assert job_url in links
+    assert corpus.count("SOURCE: LINKED PDF PAGE") == 2
+    assert corpus.count(batch_sources.SOURCE_DOCUMENT_SEPARATOR) == 2
     assert any(doc.source_type == "linked_pdf" and doc.url == pdf_url for doc in documents)
     assert warnings == []
 
@@ -167,16 +178,12 @@ def test_structured_jobs_and_internships_tables_are_parsed_without_llm(monkeypat
         subject="Industry Opportunities",
         body_html=html,
     )
-    corpus, _, _, warnings = batch_sources.build_source_corpus(
-        email,
-        fetch_linked_pdfs=False,
-    )
+    corpus, _, _, warnings = batch_sources.build_source_corpus(email, fetch_linked_pdfs=False)
 
     def no_llm(_chunk: str):
         raise AssertionError("structured table rows should not require LLM extraction")
 
     monkeypatch.setattr(all_job_extraction, "_invoke", no_llm)
-
     opportunities, metrics, errors = all_job_extraction.extract_all_opportunities(
         source_name="Goh Ze Li",
         source_message_id="m5",
@@ -227,16 +234,12 @@ def test_rowspan_continuations_keep_company_and_events_are_excluded(monkeypatch)
         subject="Industry Opportunities",
         body_html=html,
     )
-    corpus, _, _, warnings = batch_sources.build_source_corpus(
-        email,
-        fetch_linked_pdfs=False,
-    )
+    corpus, _, _, warnings = batch_sources.build_source_corpus(email, fetch_linked_pdfs=False)
 
     def no_llm(_chunk: str):
         raise AssertionError("job table and event-only residual should not require LLM")
 
     monkeypatch.setattr(all_job_extraction, "_invoke", no_llm)
-
     opportunities, metrics, errors = all_job_extraction.extract_all_opportunities(
         source_name="Goh Ze Li",
         source_message_id="m6",
@@ -297,9 +300,9 @@ def test_pdf_embedded_direct_urls_are_reattached_to_matching_roles(monkeypatch) 
 
     monkeypatch.setattr(all_job_extraction, "_invoke", fake_invoke)
     corpus = (
-        "SOURCE: LINKED PDF\n"
+        "SOURCE: LINKED PDF PAGE\nPAGE: 1\n"
         "Point72 Academy Investment Analyst opportunities\n"
-        "PDF EMBEDDED LINKS:\n"
+        "[[SIMPLYNEXT_PDF_PAGE_LINKS]]\n"
         f"<{internship_url}>\n<{full_time_url}>"
     )
 

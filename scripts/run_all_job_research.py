@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections import defaultdict
+from pathlib import Path
 
-from career_agent.all_job_extraction import extract_all_opportunities
 from career_agent.batch_job_research import research_career_email_record
-from career_agent.batch_sources import build_source_corpus
 from career_agent.connectors.outlook_graph import CAREER_SOURCE_BY_SENDER, OutlookGraphConnector
 from career_agent.models.inbox import CareerEmailRecord
+
+DEFAULT_OUTPUT = Path("data/job_records/latest_job_records.json")
 
 
 def _source_key(sender_email: str | None) -> str | None:
@@ -19,165 +21,81 @@ def _short(value: str | None, limit: int = 120) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def _extract_only(record: CareerEmailRecord, fetch_linked_pdfs: bool):
-    email = record.email
-    corpus, _, documents, warnings = build_source_corpus(
-        email,
-        fetch_linked_pdfs=fetch_linked_pdfs,
-    )
-    opportunities, metrics, errors = extract_all_opportunities(
-        source_name=email.sender_name or email.sender_email or record.source,
-        source_message_id=email.message_id,
-        source_date=email.received_at,
-        corpus=corpus,
-    )
-    return corpus, documents, opportunities, metrics, warnings, errors
+def _latest_per_source(messages):
+    selected = {}
+    for message in messages:
+        source = _source_key(message.sender_email)
+        if source and source not in selected:
+            selected[source] = message
+    return [selected[key] for key in ("goh_ze_li", "talentconnect") if key in selected]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="SimplyNext: extract every job from recent career emails and research official JDs."
+        description="SimplyNext: read latest trusted career emails/attachments, research original jobs, and write matching-ready JobRecords."
     )
     parser.add_argument("--scan", type=int, default=30)
-    parser.add_argument("--limit", type=int, default=2)
     parser.add_argument(
         "--source",
         choices=["goh_ze_li", "talentconnect"],
         default=None,
-        help="Optionally select only one trusted career source before applying --limit.",
+        help="Optional single-source run. Omit to process latest Goh + latest TalentConnect email.",
     )
     parser.add_argument(
         "--subject",
         default=None,
-        help="Optional case-insensitive subject filter for repeatable testing.",
+        help="Optional case-insensitive subject filter.",
     )
     parser.add_argument(
         "--no-linked-pdf",
         action="store_true",
-        help="Skip public PDF retrieval while debugging extraction.",
+        help="Skip linked PDF retrieval only for debugging.",
     )
     parser.add_argument(
-        "--extract-only",
-        action="store_true",
-        help="Stop after exhaustive email/PDF opportunity extraction; no web job research.",
+        "--output",
+        default=str(DEFAULT_OUTPUT),
+        help="JSON output path for the matching agent.",
     )
     args = parser.parse_args()
 
     connector = OutlookGraphConnector()
     messages = connector.get_messages(top=args.scan, include_attachments=True)
+    messages = [message for message in messages if _source_key(message.sender_email)]
+
     if args.source:
         messages = [message for message in messages if _source_key(message.sender_email) == args.source]
+        messages = messages[:1]
+    else:
+        messages = _latest_per_source(messages)
+
     if args.subject:
         messages = [
-            message
-            for message in messages
+            message for message in messages
             if args.subject.lower() in (message.subject or "").lower()
         ]
-    messages = messages[: args.limit]
-
-    print("=" * 112)
-    print(
-        "SIMPLYNEXT — ALL-JOB EXTRACTION"
-        if args.extract_only
-        else "SIMPLYNEXT — ALL-JOB EMAIL RESEARCH → JOB RECORDS"
-    )
-    print("=" * 112)
-    print("Trusted career emails selected:", len(messages))
-    if args.source:
-        print("Source filter               :", args.source)
 
     if not messages:
         raise RuntimeError("No trusted Goh Ze Li / TalentConnect email matched the request.")
 
-    if args.extract_only:
-        total_opportunities = 0
-        total_companies: set[str] = set()
-        total_llm_calls = 0
-        total_chars = 0
+    print("=" * 112)
+    print("SIMPLYNEXT — CAREER EMAILS → ORIGINAL SOURCES/JD → MATCHING DATASET")
+    print("=" * 112)
+    print("Trusted career emails selected:", len(messages))
 
-        for email_index, email in enumerate(messages, start=1):
-            source = _source_key(email.sender_email)
-            if source is None:
-                continue
-            record = CareerEmailRecord(source=source, email=email)
-            corpus, documents, opportunities, metrics, warnings, errors = _extract_only(
-                record,
-                fetch_linked_pdfs=not args.no_linked_pdf,
-            )
-
-            print("\n" + "-" * 112)
-            print(f"EMAIL {email_index}/{len(messages)}")
-            print("Source :", f"{email.sender_name} <{email.sender_email}>")
-            print("Subject:", _short(email.subject, 170))
-            print("Source documents:")
-            for doc in documents:
-                suffix = f" | {doc.url}" if doc.url else ""
-                print(f"  - {doc.source_type:11} {doc.text_chars:7} chars | {doc.label}{suffix}")
-
-            companies: dict[str, list] = defaultdict(list)
-            for opportunity in opportunities:
-                companies[opportunity.company or "<unknown>"].append(opportunity)
-
-            print("\nEXTRACTED OPPORTUNITIES")
-            for company, roles in companies.items():
-                print("\n  " + company)
-                for role in roles:
-                    print(
-                        f"    - {_short(role.role_title, 96)}"
-                        f" | {role.opportunity_type}"
-                        f" | {role.location or 'location unknown'}"
-                    )
-                    if role.urls:
-                        print("      direct URLs:", len(role.urls))
-                        for url in role.urls[:3]:
-                            print("        ", url)
-
-            print("\nEMAIL EXTRACTION METRICS")
-            print("  source chars  :", len(corpus))
-            print("  opportunities :", len(opportunities))
-            print("  companies     :", len(companies))
-            print("  extraction LLM:", metrics.llm_calls)
-            print("  warnings      :", len(warnings))
-            print("  errors        :", len(errors))
-            for warning in warnings[:8]:
-                print("    WARN:", _short(warning, 180))
-            for error in errors[:8]:
-                print("    ERROR:", _short(error, 180))
-
-            total_opportunities += len(opportunities)
-            total_companies.update(companies)
-            total_llm_calls += metrics.llm_calls
-            total_chars += metrics.source_chars
-
-        print("\n" + "=" * 112)
-        print("EXTRACTION SUMMARY")
-        print("=" * 112)
-        print("Opportunities    :", total_opportunities)
-        print("Companies        :", len(total_companies))
-        print("Source chars     :", total_chars)
-        print("Extraction LLM   :", total_llm_calls)
-        print("\nStopped after extraction. No web research or matching was run.")
-        return
-
-    grand_jobs = 0
-    grand_companies: set[str] = set()
-    grand_verified = 0
-    grand_jd = 0
-    grand_expired = 0
-    grand_searches = 0
-    grand_fetches = 0
-    grand_judges = 0
-    grand_extract_calls = 0
+    all_results = []
+    all_job_records = []
+    grand_searches = grand_fetches = grand_extract_calls = grand_judges = 0
 
     for email_index, email in enumerate(messages, start=1):
         source = _source_key(email.sender_email)
         if source is None:
             continue
-        record = CareerEmailRecord(source=source, email=email)
         result = research_career_email_record(
-            record,
+            CareerEmailRecord(source=source, email=email),
             fetch_linked_pdfs=not args.no_linked_pdf,
         )
+        all_results.append(result)
+        all_job_records.extend(result.job_records)
 
         print("\n" + "-" * 112)
         print(f"EMAIL {email_index}/{len(messages)}")
@@ -191,9 +109,7 @@ def main() -> None:
         print("\nEXTRACTION")
         print("  opportunities :", len(result.opportunities))
         print("  companies     :", result.company_count)
-        print("  extraction LLM:", result.extraction_llm_calls)
-        print("  source chars  :", result.extraction_source_chars)
-        print("  JobRecords    :", len(result.job_records), "of", len(result.opportunities))
+        print("  JobRecords    :", len(result.job_records))
 
         grouped: dict[str, list] = defaultdict(list)
         for job in result.job_records:
@@ -202,74 +118,76 @@ def main() -> None:
         for company, jobs in grouped.items():
             print("\n  " + company)
             for job in jobs:
+                mark = "✓" if job.jd_text.strip() and job.jd_source_url else "?"
                 if job.availability_status == "expired_by_source_deadline":
-                    status_mark = "×"
-                elif job.research_status == "verified_exact_job":
-                    status_mark = "✓"
-                else:
-                    status_mark = "?"
+                    mark = "×"
                 print(
-                    f"    {status_mark} {_short(job.title, 92)}"
+                    f"    {mark} {_short(job.title, 92)}"
                     f" | {job.opportunity_type}"
-                    f" | availability={job.availability_status}"
                     f" | research={job.research_status}"
                     f" | jd={job.jd_status} ({len(job.jd_text)} chars)"
                 )
-                if job.research_skipped_reason:
-                    print("      skipped :", job.research_skipped_reason)
-                if job.official_job_url:
-                    print("      official:", job.official_job_url)
-                elif job.application_url:
-                    print("      apply   :", job.application_url)
+                if job.primary_source_url:
+                    print("      primary  :", job.primary_source_url)
+                if job.secondary_source_url:
+                    print("      secondary:", job.secondary_source_url)
                 if job.jd_source_url:
                     print("      JD source:", job.jd_source_url)
+                if job.research_skipped_reason:
+                    print("      skipped  :", job.research_skipped_reason)
 
-        verified = sum(
-            1 for job in result.job_records if job.research_status == "verified_exact_job"
-        )
-        jds = sum(1 for job in result.job_records if job.jd_text.strip())
-        expired = sum(
-            1 for job in result.job_records if job.availability_status == "expired_by_source_deadline"
-        )
         print("\nEMAIL METRICS")
-        print("  JobRecords    :", len(result.job_records))
-        print("  expired/skipped:", expired)
-        print("  exact verified:", verified)
-        print("  JD available  :", jds)
         print("  web searches  :", result.web_search_calls)
         print("  page fetches  :", result.page_fetch_calls)
         print("  judge LLM     :", result.judge_llm_calls)
         print("  extraction LLM:", result.extraction_llm_calls)
         print("  warnings      :", len(result.warnings))
         print("  errors        :", len(result.errors))
-        for warning in result.warnings[:8]:
-            print("    WARN:", _short(warning, 180))
-        for error in result.errors[:8]:
-            print("    ERROR:", _short(error, 180))
 
-        grand_jobs += len(result.job_records)
-        grand_companies.update((job.company or "<unknown>") for job in result.job_records)
-        grand_verified += verified
-        grand_jd += jds
-        grand_expired += expired
         grand_searches += result.web_search_calls
         grand_fetches += result.page_fetch_calls
-        grand_judges += result.judge_llm_calls
         grand_extract_calls += result.extraction_llm_calls
+        grand_judges += result.judge_llm_calls
+
+    payload = {
+        "schema": "simplinext.job_records.v1",
+        "job_count": len(all_job_records),
+        "jobs": [job.model_dump(mode="json") for job in all_job_records],
+        "source_results": [
+            {
+                "source_key": result.source_key,
+                "source_message_id": result.source_message_id,
+                "source_subject": result.source_subject,
+                "opportunities": len(result.opportunities),
+                "job_records": len(result.job_records),
+                "warnings": result.warnings,
+                "errors": result.errors,
+            }
+            for result in all_results
+        ],
+    }
+
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    usable_jd = sum(1 for job in all_job_records if job.jd_text.strip() and job.jd_source_url)
+    primary = sum(1 for job in all_job_records if job.primary_source_url)
+    secondary = sum(1 for job in all_job_records if job.secondary_source_url)
 
     print("\n" + "=" * 112)
-    print("BATCH SUMMARY")
+    print("MATCHING DATASET SUMMARY")
     print("=" * 112)
-    print("JobRecords       :", grand_jobs)
-    print("Companies        :", len(grand_companies))
-    print("Expired/skipped  :", grand_expired)
-    print("Exact verified   :", grand_verified)
-    print("JD available     :", grand_jd)
+    print("JobRecords       :", len(all_job_records))
+    print("With JD+source   :", usable_jd)
+    print("Primary links    :", primary)
+    print("Secondary links  :", secondary)
     print("Web searches     :", grand_searches)
     print("Page fetches     :", grand_fetches)
     print("Judge LLM calls  :", grand_judges)
     print("Extraction LLM   :", grand_extract_calls)
-    print("\nStopped at JobRecord. Resume/transcript matching is intentionally not run.")
+    print("Dataset written  :", output)
+    print("\nReady for Resume/Transcript Match Agent consumption.")
 
 
 if __name__ == "__main__":

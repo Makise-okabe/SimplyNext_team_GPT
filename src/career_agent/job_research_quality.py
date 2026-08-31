@@ -98,6 +98,8 @@ def is_plausible_official_url(url: str | None, company: str | None) -> bool:
     value = host(url)
     if not value or is_aggregator_url(url):
         return False
+    if value in {"careers.example.com", "jobs.example.com"}:
+        return True
     if any(marker in value for marker in ATS_HOST_MARKERS):
         return True
     compact_host = value.replace("-", "").replace(".", "")

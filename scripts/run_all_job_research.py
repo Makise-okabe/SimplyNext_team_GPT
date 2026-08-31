@@ -41,6 +41,15 @@ def main() -> None:
     parser.add_argument("--scan", type=int, default=30)
     parser.add_argument("--limit", type=int, default=2)
     parser.add_argument(
+        "--job-limit",
+        type=int,
+        default=None,
+        help=(
+            "Research only the first N extracted jobs per selected email. "
+            "Extraction still runs on the whole email; omit for the full batch."
+        ),
+    )
+    parser.add_argument(
         "--subject",
         default=None,
         help="Optional case-insensitive subject filter for repeatable testing.",
@@ -56,6 +65,11 @@ def main() -> None:
         help="Stop after exhaustive email/PDF opportunity extraction; no web job research.",
     )
     args = parser.parse_args()
+
+    if args.job_limit is not None and args.job_limit < 1:
+        parser.error("--job-limit must be >= 1")
+    if args.extract_only and args.job_limit is not None:
+        parser.error("--job-limit is only used during JobRecord research, not --extract-only")
 
     connector = OutlookGraphConnector()
     messages = connector.get_messages(top=args.scan, include_attachments=True)
@@ -75,6 +89,8 @@ def main() -> None:
     )
     print("=" * 112)
     print("Trusted career emails selected:", len(messages))
+    if not args.extract_only and args.job_limit is not None:
+        print("Research throttle          : first", args.job_limit, "jobs per email")
 
     if not messages:
         raise RuntimeError("No trusted Goh Ze Li / TalentConnect email matched the request.")
@@ -166,6 +182,7 @@ def main() -> None:
         result = research_career_email_record(
             record,
             fetch_linked_pdfs=not args.no_linked_pdf,
+            job_limit=args.job_limit,
         )
 
         print("\n" + "-" * 112)
@@ -182,6 +199,8 @@ def main() -> None:
         print("  companies     :", result.company_count)
         print("  extraction LLM:", result.extraction_llm_calls)
         print("  source chars  :", result.extraction_source_chars)
+        if args.job_limit is not None:
+            print("  researched now:", len(result.job_records), "of", len(result.opportunities))
 
         grouped: dict[str, list] = defaultdict(list)
         for job in result.job_records:

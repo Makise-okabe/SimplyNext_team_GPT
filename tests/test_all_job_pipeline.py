@@ -36,7 +36,12 @@ def test_rich_html_source_preserves_anchor_url_without_duplicate_plain_body(monk
 
 def test_linked_pdf_is_added_as_source_document(monkeypatch) -> None:
     pdf_url = "https://nus.edu.sg/cfg/docs/enews.pdf"
-    monkeypatch.setattr(batch_sources, "_fetch_linked_pdf", lambda url: "Mastercard Graduate Analyst")
+    job_url = "https://careers.example.com/job/12345"
+    monkeypatch.setattr(
+        batch_sources,
+        "_fetch_linked_pdf",
+        lambda url: ("Mastercard Graduate Analyst", [job_url]),
+    )
 
     email = EmailMessage(
         message_id="m2",
@@ -45,9 +50,11 @@ def test_linked_pdf_is_added_as_source_document(monkeypatch) -> None:
         body_html=f"<a href='{pdf_url}'>Download eNews PDF</a>",
     )
 
-    corpus, _, documents, warnings = batch_sources.build_source_corpus(email)
+    corpus, links, documents, warnings = batch_sources.build_source_corpus(email)
 
     assert "Mastercard Graduate Analyst" in corpus
+    assert job_url in corpus
+    assert job_url in links
     assert any(doc.source_type == "linked_pdf" and doc.url == pdf_url for doc in documents)
     assert warnings == []
 
@@ -248,4 +255,62 @@ def test_rowspan_continuations_keep_company_and_events_are_excluded(monkeypatch)
     assert pairs[("OPPO", "[Qianhai] Software Product Manager (Overseas)")].location == "Shenzhen, China"
     assert metrics.llm_calls == 0
     assert warnings == []
+    assert errors == []
+
+
+def test_ordinal_deadline_is_parsed_for_expiry_gate() -> None:
+    assert str(all_job_extraction._parse_date_hint("Deadline: 5th Dec 2025")) == "2025-12-05"
+    assert str(all_job_extraction._parse_date_hint("Deadline: 21st Dec 25")) == "2025-12-21"
+    assert str(all_job_extraction._parse_date_hint("Deadline: 23rd Dec 2025")) == "2025-12-23"
+    assert str(all_job_extraction._parse_date_hint("Deadline: 24th Dec 25")) == "2025-12-24"
+
+
+def test_pdf_embedded_direct_urls_are_reattached_to_matching_roles(monkeypatch) -> None:
+    internship_url = (
+        "https://careers.point72.com/CSJobDetail?"
+        "jobName=point72-academy-investment-analyst-summer-internship-2027-sg&"
+        "jobCode=CPA-0015001"
+    )
+    full_time_url = (
+        "https://careers.point72.com/CSJobDetail?"
+        "jobName=point72-academy-investment-analyst-program-for-upcoming-graduates-2027-sg&"
+        "jobCode=CPA-0014976"
+    )
+
+    def fake_invoke(_chunk: str) -> ExtractedOpportunityBatch:
+        return ExtractedOpportunityBatch(
+            opportunities=[
+                ExtractedOpportunity(
+                    company="Point72",
+                    role_title="Point72 Academy Investment Analyst Summer Internship",
+                    opportunity_type="internship",
+                    evidence_text="Point72 Academy Investment Analyst Summer Internship",
+                ),
+                ExtractedOpportunity(
+                    company="Point72",
+                    role_title="Point72 Academy Investment Analyst Program for Upcoming Graduates",
+                    opportunity_type="full_time",
+                    evidence_text="Point72 Academy Investment Analyst Program for Upcoming Graduates",
+                ),
+            ]
+        )
+
+    monkeypatch.setattr(all_job_extraction, "_invoke", fake_invoke)
+    corpus = (
+        "SOURCE: LINKED PDF\n"
+        "Point72 Academy Investment Analyst opportunities\n"
+        "PDF EMBEDDED LINKS:\n"
+        f"<{internship_url}>\n<{full_time_url}>"
+    )
+
+    opportunities, _, errors = all_job_extraction.extract_all_opportunities(
+        source_name="TalentConnect",
+        source_message_id="m7",
+        source_date=None,
+        corpus=corpus,
+    )
+
+    by_title = {item.role_title: item for item in opportunities}
+    assert by_title["Point72 Academy Investment Analyst Summer Internship"].urls == [internship_url]
+    assert by_title["Point72 Academy Investment Analyst Program for Upcoming Graduates"].urls == [full_time_url]
     assert errors == []

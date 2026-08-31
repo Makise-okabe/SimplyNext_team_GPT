@@ -17,12 +17,39 @@ from career_agent.nodes.normalize_email import (
 MAX_LINKED_PDFS = 8
 MAX_PDF_BYTES = 12 * 1024 * 1024
 MAX_PDF_TEXT_CHARS = 120_000
+MAX_PDF_EMPLOYMENT_LINKS = 30
+MAX_LINKED_JOB_PAGE_CHARS = 12_000
 TABLE_START = "[[SIMPLYNEXT_TABLE_START]]"
 TABLE_END = "[[SIMPLYNEXT_TABLE_END]]"
 SOURCE_DOCUMENT_SEPARATOR = "================ SOURCE DOCUMENT ================"
 PDF_PAGE_START = "[[SIMPLYNEXT_PDF_PAGE_START:"
 PDF_PAGE_LINKS = "[[SIMPLYNEXT_PDF_PAGE_LINKS]]"
 PDF_PAGE_END = "[[SIMPLYNEXT_PDF_PAGE_END]]"
+
+ATS_HOST_MARKERS = (
+    "myworkdayjobs.com",
+    "workdayjobs.com",
+    "greenhouse.io",
+    "lever.co",
+    "smartrecruiters.com",
+    "successfactors.com",
+    "taleo.net",
+    "icims.com",
+    "jobvite.com",
+)
+EMPLOYMENT_URL_MARKERS = (
+    "/job",
+    "jobs/",
+    "career",
+    "position",
+    "requisition",
+    "jobdetail",
+    "jobcode=",
+    "intern",
+    "graduate",
+    "opportunit",
+    "apply",
+)
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -42,6 +69,19 @@ def _looks_like_pdf(url: str) -> bool:
     except ValueError:
         return False
     return parsed.path.lower().endswith(".pdf")
+
+
+def _looks_like_employment_link(url: str) -> bool:
+    if not _is_http(url) or _looks_like_pdf(url):
+        return False
+    lowered = url.lower()
+    try:
+        host = urlparse(url).netloc.lower()
+    except ValueError:
+        host = ""
+    return any(marker in host for marker in ATS_HOST_MARKERS) or any(
+        marker in lowered for marker in EMPLOYMENT_URL_MARKERS
+    )
 
 
 def _fragment_text_with_links(fragment) -> str:
@@ -124,15 +164,23 @@ def _page_uri_links(page) -> list[str]:
     return _dedupe(urls)
 
 
+def _extract_pdf_page_text(page) -> str:
+    """Prefer pypdf's layout mode so newsletter columns stay in reading order."""
+    try:
+        text = page.extract_text(extraction_mode="layout") or ""
+    except (TypeError, ValueError, NotImplementedError):
+        text = page.extract_text() or ""
+    return text.strip()
+
+
 def _pdf_pages_and_links(raw: bytes) -> tuple[list[str], list[str]]:
-    """Open a PDF and return self-contained page documents with local hyperlinks."""
     reader = PdfReader(BytesIO(raw))
     pages: list[str] = []
     all_links: list[str] = []
     text_budget = MAX_PDF_TEXT_CHARS
 
     for page_number, page in enumerate(reader.pages, start=1):
-        visible = (page.extract_text() or "").strip()
+        visible = _extract_pdf_page_text(page)
         page_links = _page_uri_links(page)
         all_links.extend(page_links)
 
@@ -166,6 +214,28 @@ def _fetch_linked_pdf(
         if "pdf" not in content_type and not raw.startswith(b"%PDF"):
             raise ValueError("linked resource is not a PDF")
     return _pdf_pages_and_links(raw)
+
+
+def _fetch_linked_job_page(url: str, timeout_seconds: float = 12.0) -> str:
+    """Fetch readable static text from a careers/job URL found inside a PDF."""
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; SimplyNextCareerAgent/0.1)"}
+    with httpx.Client(follow_redirects=True, timeout=timeout_seconds, headers=headers) as client:
+        response = client.get(url)
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "").lower()
+        if "html" not in content_type and "text" not in content_type:
+            return ""
+        html = response.text
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "svg"]):
+        tag.decompose()
+    title = " ".join((soup.title.get_text(" ", strip=True) if soup.title else "").split())
+    body = "\n".join(
+        line.strip() for line in soup.get_text("\n").splitlines() if line.strip()
+    )
+    text = f"PAGE TITLE: {title}\n{body}" if title else body
+    return text[:MAX_LINKED_JOB_PAGE_CHARS].strip()
 
 
 def build_source_corpus(
@@ -207,6 +277,7 @@ def build_source_corpus(
         ]
     )
 
+    crawled_job_urls: set[str] = set()
     if fetch_linked_pdfs:
         pdf_urls = [url for url in links if _is_http(url) and _looks_like_pdf(url)][:MAX_LINKED_PDFS]
         for url in pdf_urls:
@@ -225,6 +296,28 @@ def build_source_corpus(
                 blocks.append(
                     f"SOURCE: LINKED PDF PAGE\nPDF URL: {url}\nPAGE: {page_number}\n{page_text}"
                 )
+
+                page_links = extract_links_from_text(page_text)
+                for employment_url in page_links:
+                    if len(crawled_job_urls) >= MAX_PDF_EMPLOYMENT_LINKS:
+                        break
+                    if employment_url in crawled_job_urls or not _looks_like_employment_link(employment_url):
+                        continue
+                    crawled_job_urls.add(employment_url)
+                    try:
+                        job_text = _fetch_linked_job_page(employment_url)
+                    except Exception as exc:
+                        warnings.append(
+                            f"PDF employment link unavailable: {employment_url}: {type(exc).__name__}: {exc}"
+                        )
+                        continue
+                    if not job_text:
+                        continue
+                    blocks.append(
+                        "SOURCE: PDF-LINKED EMPLOYMENT PAGE\n"
+                        f"FROM PDF: {url}\nFROM PDF PAGE: {page_number}\n"
+                        f"URL: {employment_url}\n{job_text}"
+                    )
 
             documents.append(
                 SourceDocument(

@@ -141,15 +141,15 @@ def test_structured_jobs_and_internships_tables_are_parsed_without_llm(monkeypat
       <h3>JOBS</h3>
       <table><tbody>
         <tr><th>INDUSTRY</th><th>COMPANY</th><th>ROLE</th><th>TC ID</th><th>REMARKS</th></tr>
-        <tr><td>ICT</td><td>Amazon Singapore</td><td>Program Manager</td><td>1</td><td>Location: Singapore</td></tr>
+        <tr><td>ICT</td><td>Amazon Singapore</td><td>Program Manager</td><td>275001</td><td>Location: Singapore</td></tr>
       </tbody></table>
       <h3>INTERNSHIPS</h3>
       <table><tbody>
         <tr><th>INDUSTRY</th><th>COMPANY</th><th>ROLE</th><th>TC ID</th><th>REMARKS</th></tr>
-        <tr><td>ICT</td><td>Amazon Singapore</td><td>Program Manager Intern - AWS Cloud</td><td>2</td><td>Deadline: 24 Dec 25</td></tr>
-        <tr><td>ICT</td><td>BLACK SESAME TECHNOLOGIES (SINGAPORE) PTE LTD</td><td>AI Engineer</td><td>3</td><td>Deadline: 28 Dec 25</td></tr>
-        <tr><td>ICT</td><td>Google Asia Pacific Pte Ltd</td><td>Data Center Technician Intern, 2026</td><td>4</td><td>Summer Vacation</td></tr>
-        <tr><td>ICT</td><td>Mikomiko Pte Ltd</td><td>AI Engineer (Machine Learning)</td><td>5</td><td>Winter Vacation</td></tr>
+        <tr><td>ICT</td><td>Amazon Singapore</td><td>Program Manager Intern - AWS Cloud</td><td>275002</td><td>Deadline: 24 Dec 25</td></tr>
+        <tr><td>ICT</td><td>BLACK SESAME TECHNOLOGIES (SINGAPORE) PTE LTD</td><td>AI Engineer</td><td>275003</td><td>Deadline: 28 Dec 25</td></tr>
+        <tr><td>ICT</td><td>Google Asia Pacific Pte Ltd</td><td>Data Center Technician Intern, 2026</td><td>275004</td><td>Summer Vacation</td></tr>
+        <tr><td>ICT</td><td>Mikomiko Pte Ltd</td><td>AI Engineer (Machine Learning)</td><td>275005</td><td>Winter Vacation</td></tr>
       </tbody></table>
     </body></html>
     """

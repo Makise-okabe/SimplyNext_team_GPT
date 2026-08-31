@@ -7,9 +7,11 @@ from pathlib import Path
 
 from career_agent.batch_job_research import research_career_email_record
 from career_agent.connectors.outlook_graph import CAREER_SOURCE_BY_SENDER, OutlookGraphConnector
+from career_agent.matching_dataset import is_matching_ready, sanitize_job_sources
 from career_agent.models.inbox import CareerEmailRecord
 
 DEFAULT_OUTPUT = Path("data/job_records/latest_job_records.json")
+DEFAULT_ARCHIVE_OUTPUT = Path("data/job_records/latest_job_records_archive.json")
 
 
 def _source_key(sender_email: str | None) -> str | None:
@@ -30,6 +32,11 @@ def _latest_per_source(messages):
     return [selected[key] for key in ("goh_ze_li", "talentconnect") if key in selected]
 
 
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="SimplyNext: read latest trusted career emails/attachments, research original jobs, and write matching-ready JobRecords."
@@ -41,11 +48,7 @@ def main() -> None:
         default=None,
         help="Optional single-source run. Omit to process latest Goh + latest TalentConnect email.",
     )
-    parser.add_argument(
-        "--subject",
-        default=None,
-        help="Optional case-insensitive subject filter.",
-    )
+    parser.add_argument("--subject", default=None, help="Optional case-insensitive subject filter.")
     parser.add_argument(
         "--no-linked-pdf",
         action="store_true",
@@ -54,7 +57,12 @@ def main() -> None:
     parser.add_argument(
         "--output",
         default=str(DEFAULT_OUTPUT),
-        help="JSON output path for the matching agent.",
+        help="Matching-ready JSON output path.",
+    )
+    parser.add_argument(
+        "--archive-output",
+        default=str(DEFAULT_ARCHIVE_OUTPUT),
+        help="Full provenance/archive JSON output path.",
     )
     args = parser.parse_args()
 
@@ -63,8 +71,7 @@ def main() -> None:
     messages = [message for message in messages if _source_key(message.sender_email)]
 
     if args.source:
-        messages = [message for message in messages if _source_key(message.sender_email) == args.source]
-        messages = messages[:1]
+        messages = [message for message in messages if _source_key(message.sender_email) == args.source][:1]
     else:
         messages = _latest_per_source(messages)
 
@@ -73,7 +80,6 @@ def main() -> None:
             message for message in messages
             if args.subject.lower() in (message.subject or "").lower()
         ]
-
     if not messages:
         raise RuntimeError("No trusted Goh Ze Li / TalentConnect email matched the request.")
 
@@ -95,7 +101,8 @@ def main() -> None:
             fetch_linked_pdfs=not args.no_linked_pdf,
         )
         all_results.append(result)
-        all_job_records.extend(result.job_records)
+        sanitized = [sanitize_job_sources(job) for job in result.job_records]
+        all_job_records.extend(sanitized)
 
         print("\n" + "-" * 112)
         print(f"EMAIL {email_index}/{len(messages)}")
@@ -109,16 +116,16 @@ def main() -> None:
         print("\nEXTRACTION")
         print("  opportunities :", len(result.opportunities))
         print("  companies     :", result.company_count)
-        print("  JobRecords    :", len(result.job_records))
+        print("  JobRecords    :", len(sanitized))
 
         grouped: dict[str, list] = defaultdict(list)
-        for job in result.job_records:
+        for job in sanitized:
             grouped[job.company or "<unknown>"].append(job)
 
         for company, jobs in grouped.items():
             print("\n  " + company)
             for job in jobs:
-                mark = "✓" if job.jd_text.strip() and job.jd_source_url else "?"
+                mark = "✓" if is_matching_ready(job) else "?"
                 if job.availability_status == "expired_by_source_deadline":
                     mark = "×"
                 print(
@@ -149,8 +156,10 @@ def main() -> None:
         grand_extract_calls += result.extraction_llm_calls
         grand_judges += result.judge_llm_calls
 
-    payload = {
-        "schema": "simplinext.job_records.v1",
+    matching_jobs = [job for job in all_job_records if is_matching_ready(job)]
+
+    archive_payload = {
+        "schema": "simplinext.job_records.archive.v1",
         "job_count": len(all_job_records),
         "jobs": [job.model_dump(mode="json") for job in all_job_records],
         "source_results": [
@@ -166,27 +175,33 @@ def main() -> None:
             for result in all_results
         ],
     }
+    matching_payload = {
+        "schema": "simplinext.job_records.matching.v1",
+        "job_count": len(matching_jobs),
+        "jobs": [job.model_dump(mode="json") for job in matching_jobs],
+    }
 
     output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    archive_output = Path(args.archive_output)
+    _write_json(output, matching_payload)
+    _write_json(archive_output, archive_payload)
 
-    usable_jd = sum(1 for job in all_job_records if job.jd_text.strip() and job.jd_source_url)
-    primary = sum(1 for job in all_job_records if job.primary_source_url)
-    secondary = sum(1 for job in all_job_records if job.secondary_source_url)
+    primary = sum(1 for job in matching_jobs if job.primary_source_url)
+    secondary = sum(1 for job in matching_jobs if job.secondary_source_url)
 
     print("\n" + "=" * 112)
     print("MATCHING DATASET SUMMARY")
     print("=" * 112)
-    print("JobRecords       :", len(all_job_records))
-    print("With JD+source   :", usable_jd)
+    print("Archive JobRecords:", len(all_job_records))
+    print("Matching-ready   :", len(matching_jobs))
     print("Primary links    :", primary)
     print("Secondary links  :", secondary)
     print("Web searches     :", grand_searches)
     print("Page fetches     :", grand_fetches)
     print("Judge LLM calls  :", grand_judges)
     print("Extraction LLM   :", grand_extract_calls)
-    print("Dataset written  :", output)
+    print("Matching dataset :", output)
+    print("Archive dataset  :", archive_output)
     print("\nReady for Resume/Transcript Match Agent consumption.")
 
 

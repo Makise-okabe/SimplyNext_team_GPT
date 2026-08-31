@@ -57,12 +57,7 @@ def test_career_email_record_becomes_job_record_without_identity_llm(monkeypatch
     monkeypatch.setattr(
         batch_job_research,
         "build_source_corpus",
-        lambda email, fetch_linked_pdfs=True: (
-            email.body_text,
-            [],
-            [],
-            [],
-        ),
+        lambda email, fetch_linked_pdfs=True: (email.body_text, [], [], []),
     )
     monkeypatch.setattr(
         batch_job_research,
@@ -94,11 +89,7 @@ def test_career_email_record_becomes_job_record_without_identity_llm(monkeypatch
             metrics=ResearchMetrics(search_calls=1, fetch_calls=1, judge_llm_calls=0),
         )
 
-    monkeypatch.setattr(
-        batch_job_research,
-        "research_concrete_job_or_delegate",
-        fake_research,
-    )
+    monkeypatch.setattr(batch_job_research, "research_concrete_job_or_delegate", fake_research)
     monkeypatch.setattr(
         batch_job_research,
         "_fetch_best_jd",
@@ -125,7 +116,7 @@ def test_career_email_record_becomes_job_record_without_identity_llm(monkeypatch
     assert result.judge_llm_calls == 0
 
 
-def test_job_limit_researches_subset_but_preserves_full_extraction(monkeypatch) -> None:
+def test_full_batch_researches_every_nonexpired_extracted_job(monkeypatch) -> None:
     email = EmailMessage(
         message_id="m2",
         sender_name="Goh Ze Li",
@@ -170,11 +161,7 @@ def test_job_limit_researches_subset_but_preserves_full_extraction(monkeypatch) 
         researched.append(identity.title or "")
         return _package(identity, message_id="m2")
 
-    monkeypatch.setattr(
-        batch_job_research,
-        "research_concrete_job_or_delegate",
-        fake_research,
-    )
+    monkeypatch.setattr(batch_job_research, "research_concrete_job_or_delegate", fake_research)
     monkeypatch.setattr(
         batch_job_research,
         "_fetch_best_jd",
@@ -187,11 +174,11 @@ def test_job_limit_researches_subset_but_preserves_full_extraction(monkeypatch) 
         ),
     )
 
-    result = batch_job_research.research_career_email_record(record, job_limit=2)
+    result = batch_job_research.research_career_email_record(record)
 
     assert len(result.opportunities) == 3
-    assert len(result.job_records) == 2
-    assert researched == ["Role 1", "Role 2"]
+    assert len(result.job_records) == 3
+    assert researched == ["Role 1", "Role 2", "Role 3"]
     assert result.company_count == 3
 
 
@@ -272,10 +259,7 @@ def test_dynamic_official_shell_falls_back_to_source_context(monkeypatch) -> Non
         lambda url: type(
             "Page",
             (),
-            {
-                "text": "Machine Learning Engineer - Xiaomi",
-                "final_url": url,
-            },
+            {"text": "Machine Learning Engineer - Xiaomi", "final_url": url},
         )(),
     )
 

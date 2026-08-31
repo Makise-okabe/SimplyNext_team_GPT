@@ -4,6 +4,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
@@ -25,6 +26,7 @@ MIN_RETRY_CHARS = 1400
 SECTION_JOBS = "jobs"
 SECTION_INTERNSHIPS = "internships"
 SECTION_EVENTS = "events"
+URL_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 
 
 @dataclass(frozen=True)
@@ -157,9 +159,10 @@ def _invoke_with_adaptive_retry(
 
 
 def _parse_date_hint(text: str):
+    # Supports 5 Dec 2025, 5th Dec 2025, 24th Dec 25, etc.
     patterns = (
-        r"(?i)deadline\s*:\s*(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(20\d{2})",
-        r"(?i)deadline\s*:\s*(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{2})",
+        r"(?i)deadline\s*:\s*(\d{1,2})(?:st|nd|rd|th)?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(20\d{2})",
+        r"(?i)deadline\s*:\s*(\d{1,2})(?:st|nd|rd|th)?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{2})",
     )
     for pattern in patterns:
         match = re.search(pattern, text)
@@ -324,9 +327,6 @@ def _extract_structured_email_document(
             continue
         residual.append(raw_line)
 
-    # Once a trusted email contains explicit JOBS/INTERNSHIPS tables, those rows
-    # are the authoritative employment list. Suppress surrounding prose so guides,
-    # challenges and marketing copy cannot cause flaky tool calls or false jobs.
     residual_text = "" if saw_structured_job_table else "\n".join(residual)
     return signals, residual_text, saw_structured_job_table
 
@@ -367,6 +367,79 @@ def _merge_signal(
     )
 
 
+def _url_match_text(url: str) -> str:
+    """Turn a concrete careers URL/query into searchable title-like text."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return ""
+    parts = [unquote(parsed.path)]
+    query = parse_qs(parsed.query)
+    for key in ("jobName", "jobname", "title", "position", "job"):
+        parts.extend(query.get(key, []))
+    return " ".join(parts).replace("-", " ").replace("_", " ")
+
+
+def _url_title_overlap(title: str | None, url: str) -> float:
+    title_tokens = {
+        token
+        for token in URL_TOKEN_PATTERN.findall((title or "").lower())
+        if len(token) >= 3 or token.isdigit()
+    }
+    if not title_tokens:
+        return 0.0
+    url_tokens = set(URL_TOKEN_PATTERN.findall(_url_match_text(url).lower()))
+    return len(title_tokens & url_tokens) / len(title_tokens)
+
+
+def _looks_like_direct_job_url(url: str) -> bool:
+    lowered = url.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "jobdetail",
+            "jobcode=",
+            "/job/",
+            "/jobs/",
+            "/position/",
+            "requisition",
+        )
+    )
+
+
+def _reattach_direct_urls(
+    opportunities: list[OpportunitySignal],
+    corpus: str,
+) -> list[OpportunitySignal]:
+    """Attach PDF/email embedded job URLs to the most compatible extracted role."""
+    corpus_urls = [
+        url
+        for url in extract_links_from_text(corpus)
+        if _looks_like_direct_job_url(url)
+    ]
+    if not corpus_urls:
+        return opportunities
+
+    enriched: list[OpportunitySignal] = []
+    for signal in opportunities:
+        if signal.urls:
+            enriched.append(signal)
+            continue
+        scored = sorted(
+            ((_url_title_overlap(signal.role_title, url), url) for url in corpus_urls),
+            reverse=True,
+        )
+        if scored and scored[0][0] >= 0.65:
+            best_score, best_url = scored[0]
+            second_score = scored[1][0] if len(scored) > 1 else 0.0
+            # Avoid attaching a URL when two postings look equally plausible.
+            if best_score - second_score >= 0.10 or best_score >= 0.90:
+                enriched.append(signal.model_copy(update={"urls": [best_url]}))
+                continue
+        enriched.append(signal)
+    return enriched
+
+
 def extract_all_opportunities(
     *,
     source_name: str,
@@ -393,8 +466,6 @@ def extract_all_opportunities(
             if residual.strip():
                 llm_inputs.append(residual)
         else:
-            # Attachments and linked PDFs remain eligible for LLM extraction even
-            # when the email itself had authoritative structured tables.
             llm_inputs.append(document)
 
     llm_calls = 0
@@ -432,8 +503,9 @@ def extract_all_opportunities(
         )
         _merge_signal(merged, signal)
 
+    opportunities = _reattach_direct_urls(list(merged.values()), corpus)
     return (
-        list(merged.values()),
+        opportunities,
         ExtractionMetrics(llm_calls=llm_calls, source_chars=len(corpus)),
         errors,
     )

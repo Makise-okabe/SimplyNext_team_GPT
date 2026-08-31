@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import date
 from urllib.parse import urlparse
 
+from career_agent.all_job_extraction import extract_all_opportunities
 from career_agent.batch_sources import build_source_corpus
 from career_agent.goh_extraction import extract_goh_opportunities
 from career_agent.job_identity.concrete_job_research import (
@@ -181,7 +182,6 @@ def _useful_jd_text(text: str, title: str | None) -> bool:
 
 
 def _usable_page_text(page_text: str, title: str | None) -> tuple[str | None, str | None]:
-    """Return cleaned JD text, or a rejection reason for stale/shell pages."""
     if page_is_closed(page_text):
         return None, "page explicitly says applications are closed/no longer accepting applications"
     cleaned = clean_jd_text(page_text)
@@ -202,13 +202,7 @@ def _fetch_best_jd(package, source_context: str) -> tuple[str, str | None, str, 
             fetches += 1
             cleaned, reason = _usable_page_text(page.text, title)
             if cleaned:
-                return (
-                    "fetched_official",
-                    page.final_url or package.official_job_url,
-                    cleaned,
-                    warnings,
-                    fetches,
-                )
+                return "fetched_official", page.final_url or package.official_job_url, cleaned, warnings, fetches
             warnings.append(
                 f"official job page returned only a {reason}; retained fallback context"
             )
@@ -224,13 +218,7 @@ def _fetch_best_jd(package, source_context: str) -> tuple[str, str | None, str, 
             fetches += 1
             cleaned, reason = _usable_page_text(page.text, title)
             if cleaned:
-                return (
-                    "fetched_secondary",
-                    page.final_url or url,
-                    cleaned,
-                    warnings,
-                    fetches,
-                )
+                return "fetched_secondary", page.final_url or url, cleaned, warnings, fetches
             warnings.append(f"secondary page rejected: {reason}")
         except Exception as exc:
             fetches += 1
@@ -265,7 +253,6 @@ def _result_relevant(signal: OpportunitySignal, result: SearchResult) -> bool:
 def _simple_web_fallback(
     signal: OpportunitySignal,
 ) -> tuple[str | None, str | None, str | None, str, str, int, int, list[str]]:
-    """Simple fallback: official employer/ATS first, then public secondary mirrors."""
     warnings: list[str] = []
     company = signal.company or ""
     title = signal.role_title or ""
@@ -277,16 +264,9 @@ def _simple_web_fallback(
         results = search_public_web(query, max_results=12)
         search_calls += 1
     except Exception as exc:
-        return (
-            None,
-            None,
-            None,
-            "unavailable",
-            "",
-            1,
-            0,
-            [f"fallback search failed: {type(exc).__name__}: {exc}"],
-        )
+        return None, None, None, "unavailable", "", 1, 0, [
+            f"fallback search failed: {type(exc).__name__}: {exc}"
+        ]
 
     relevant = [result for result in results if _result_relevant(signal, result)]
     primary_candidates = [
@@ -322,16 +302,7 @@ def _simple_web_fallback(
                 )
             warnings.append(f"fallback candidate rejected: {result.url}: {reason}")
 
-    return (
-        primary_url,
-        secondary_url,
-        None,
-        "unavailable",
-        "",
-        search_calls,
-        fetch_calls,
-        warnings,
-    )
+    return primary_url, secondary_url, None, "unavailable", "", search_calls, fetch_calls, warnings
 
 
 def _is_expired(signal: OpportunitySignal, *, today: date | None = None) -> bool:
@@ -375,16 +346,21 @@ def research_career_email_record(
     )
 
     if record.source == "talentconnect":
-        extraction_fn = extract_talentconnect_opportunities
+        opportunities, extraction_metrics, extraction_errors = extract_talentconnect_opportunities(
+            source_name=email.sender_name or email.sender_email or record.source,
+            source_message_id=email.message_id,
+            source_date=email.received_at,
+            corpus=corpus,
+        )
     else:
-        extraction_fn = extract_goh_opportunities
+        opportunities, extraction_metrics, extraction_errors = extract_goh_opportunities(
+            source_name=email.sender_name or email.sender_email or record.source,
+            source_message_id=email.message_id,
+            source_date=email.received_at,
+            corpus=corpus,
+            base_extractor=extract_all_opportunities,
+        )
 
-    opportunities, extraction_metrics, extraction_errors = extraction_fn(
-        source_name=email.sender_name or email.sender_email or record.source,
-        source_message_id=email.message_id,
-        source_date=email.received_at,
-        corpus=corpus,
-    )
     research_email = email.model_copy(
         update={
             "body_text": corpus,
@@ -394,9 +370,7 @@ def research_career_email_record(
 
     groups: dict[str, list[tuple[int, OpportunitySignal]]] = defaultdict(list)
     for index, signal in enumerate(opportunities, start=1):
-        groups[" ".join((signal.company or "unknown").lower().split())].append(
-            (index, signal)
-        )
+        groups[" ".join((signal.company or "unknown").lower().split())].append((index, signal))
 
     job_records: list[JobRecord] = []
     search_calls = 0
@@ -425,19 +399,11 @@ def research_career_email_record(
             page_fetch_calls += package.metrics.fetch_calls
             judge_llm_calls += package.metrics.judge_llm_calls
             company_hosts = list(
-                dict.fromkeys(
-                    [
-                        *company_hosts,
-                        *_official_hosts_from_package(package, signal.company),
-                    ]
-                )
+                dict.fromkeys([*company_hosts, *_official_hosts_from_package(package, signal.company)])
             )
 
             context = _source_context(research_email, signal)
-            jd_status, jd_url, jd_text, jd_warnings, extra_fetches = _fetch_best_jd(
-                package,
-                context,
-            )
+            jd_status, jd_url, jd_text, jd_warnings, extra_fetches = _fetch_best_jd(package, context)
             page_fetch_calls += extra_fetches
             warnings.extend(jd_warnings)
 
@@ -447,11 +413,7 @@ def research_career_email_record(
                 else None
             )
             secondary_url = next(
-                (
-                    url
-                    for url in (package.secondary_evidence_urls or [])
-                    if is_secondary_url(url)
-                ),
+                (url for url in (package.secondary_evidence_urls or []) if is_secondary_url(url)),
                 None,
             )
 
@@ -486,9 +448,7 @@ def research_career_email_record(
                     location=signal.location,
                     opportunity_type=signal.opportunity_type,
                     deadline_hint=signal.deadline_hint,
-                    availability_status=(
-                        "active_candidate" if signal.deadline_hint else "unknown"
-                    ),
+                    availability_status="active_candidate" if signal.deadline_hint else "unknown",
                     target_major=signal.target_major,
                     target_degree_level=signal.target_degree_level,
                     source_urls=signal.urls,

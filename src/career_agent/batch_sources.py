@@ -19,6 +19,7 @@ MAX_PDF_BYTES = 12 * 1024 * 1024
 MAX_PDF_TEXT_CHARS = 120_000
 TABLE_START = "[[SIMPLYNEXT_TABLE_START]]"
 TABLE_END = "[[SIMPLYNEXT_TABLE_END]]"
+SOURCE_DOCUMENT_SEPARATOR = "================ SOURCE DOCUMENT ================"
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -55,11 +56,7 @@ def _fragment_text_with_links(fragment) -> str:
 
 
 def _rows_belonging_to_table(table) -> list:
-    """Return rows whose nearest ancestor table is exactly ``table``.
-
-    This includes normal ``table > tbody > tr`` markup while excluding rows of a
-    nested table that belongs to a cell.
-    """
+    """Return rows whose nearest ancestor table is exactly ``table``."""
     rows = []
     for row in table.find_all("tr"):
         if row.find_parent("table") is table:
@@ -81,8 +78,6 @@ def _html_to_text_with_links(html: str) -> str:
         for row in _rows_belonging_to_table(table):
             cells = row.find_all(["th", "td"], recursive=False)
             if not cells:
-                # Cells can be direct children of a row even when BeautifulSoup
-                # inserted wrapper markup around malformed newsletter HTML.
                 cells = [
                     cell
                     for cell in row.find_all(["th", "td"])
@@ -212,4 +207,4 @@ def build_source_corpus(
                 )
             )
 
-    return "\n\n================ SOURCE DOCUMENT ================\n\n".join(blocks), links, documents, warnings
+    return f"\n\n{SOURCE_DOCUMENT_SEPARATOR}\n\n".join(blocks), links, documents, warnings

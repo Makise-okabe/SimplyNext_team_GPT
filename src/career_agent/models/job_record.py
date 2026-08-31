@@ -30,12 +30,7 @@ class SourceDocument(BaseModel):
 
 
 class JobRecord(BaseModel):
-    """Job-side contract that a future matching agent can consume.
-
-    Research identity/authenticity and source-side availability are intentionally
-    separate. A trusted NUS email can prove that a role was circulated even when
-    the source deadline has already passed.
-    """
+    """Research-complete job contract consumed by the matching agent."""
 
     source_message_id: str
     source_sender_email: str | None = None
@@ -57,6 +52,12 @@ class JobRecord(BaseModel):
     research_confidence: Literal["high", "medium", "low"] = "low"
     research_basis: str = "none"
 
+    # Matching-friendly source hierarchy. ``primary_source_url`` should point to
+    # the employer/ATS source whenever we can find one. ``secondary_source_url``
+    # is a useful public mirror such as LinkedIn when the official page is absent,
+    # dynamic, or no longer readable.
+    primary_source_url: str | None = None
+    secondary_source_url: str | None = None
     official_job_url: str | None = None
     application_url: str | None = None
 

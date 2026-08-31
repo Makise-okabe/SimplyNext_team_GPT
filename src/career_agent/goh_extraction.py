@@ -18,7 +18,6 @@ def _clean(value: str) -> str:
 
 
 def _parse_deadline(text: str, source_date=None):
-    """Parse Goh deadline variants, including omitted current-year values like `31 Aug`."""
     value = text or ""
     explicit = re.search(
         r"(?i)deadline\s*:\s*(\d{1,2})\s*(?:st|nd|rd|th)?\s*"
@@ -46,8 +45,6 @@ def _parse_deadline(text: str, source_date=None):
     try:
         source_year = source_date.year
         parsed = datetime.strptime(f"{day} {month} {source_year}", "%d %b %Y").date()
-        # If an email is sent late in the year and a yearless deadline points far
-        # backwards (for example Dec email -> Jan deadline), interpret it as next year.
         if (parsed - source_date.date()).days < -120:
             parsed = parsed.replace(year=source_year + 1)
         return parsed
@@ -175,9 +172,10 @@ def extract_goh_opportunities(
     source_message_id: str,
     source_date,
     corpus: str,
+    base_extractor=extract_all_opportunities,
 ) -> tuple[list[OpportunitySignal], ExtractionMetrics, list[str]]:
     """Keep the proven extractor, then deterministically repair/expand Goh tables."""
-    base, metrics, errors = extract_all_opportunities(
+    base, metrics, errors = base_extractor(
         source_name=source_name,
         source_message_id=source_message_id,
         source_date=source_date,

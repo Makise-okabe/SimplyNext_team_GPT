@@ -39,7 +39,7 @@ def _write_json(path: Path, payload: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="SimplyNext: read latest trusted career emails/attachments, research original jobs, and write matching-ready JobRecords."
+        description="SimplyNext Track B: read latest trusted career emails/attachments, research original jobs, and write verified JobRecords."
     )
     parser.add_argument("--scan", type=int, default=30)
     parser.add_argument(
@@ -57,7 +57,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         default=str(DEFAULT_OUTPUT),
-        help="Matching-ready JSON output path.",
+        help="Matching-ready JSON output path (research output only; no matching is run).",
     )
     parser.add_argument(
         "--archive-output",
@@ -84,7 +84,7 @@ def main() -> None:
         raise RuntimeError("No trusted Goh Ze Li / TalentConnect email matched the request.")
 
     print("=" * 112)
-    print("SIMPLYNEXT — CAREER EMAILS → ORIGINAL SOURCES/JD → MATCHING DATASET")
+    print("SIMPLYNEXT TRACK B — CAREER EMAILS → ORIGINAL SOURCES/JD → JOBRECORD DATASET")
     print("=" * 112)
     print("Trusted career emails selected:", len(messages))
 
@@ -131,9 +131,12 @@ def main() -> None:
                 print(
                     f"    {mark} {_short(job.title, 92)}"
                     f" | {job.opportunity_type}"
+                    f" | availability={job.availability_status}"
                     f" | research={job.research_status}"
                     f" | jd={job.jd_status} ({len(job.jd_text)} chars)"
                 )
+                if job.deadline_hint:
+                    print("      deadline :", job.deadline_hint)
                 if job.primary_source_url:
                     print("      primary  :", job.primary_source_url)
                 if job.secondary_source_url:
@@ -150,6 +153,10 @@ def main() -> None:
         print("  extraction LLM:", result.extraction_llm_calls)
         print("  warnings      :", len(result.warnings))
         print("  errors        :", len(result.errors))
+        for warning in result.warnings[:8]:
+            print("    WARN:", _short(warning, 200))
+        for error in result.errors[:8]:
+            print("    ERROR:", _short(error, 200))
 
         grand_searches += result.web_search_calls
         grand_fetches += result.page_fetch_calls
@@ -190,7 +197,7 @@ def main() -> None:
     secondary = sum(1 for job in matching_jobs if job.secondary_source_url)
 
     print("\n" + "=" * 112)
-    print("MATCHING DATASET SUMMARY")
+    print("TRACK B DATASET SUMMARY")
     print("=" * 112)
     print("Archive JobRecords:", len(all_job_records))
     print("Matching-ready   :", len(matching_jobs))
@@ -202,7 +209,7 @@ def main() -> None:
     print("Extraction LLM   :", grand_extract_calls)
     print("Matching dataset :", output)
     print("Archive dataset  :", archive_output)
-    print("\nReady for Resume/Transcript Match Agent consumption.")
+    print("\nTrack B acceptance dataset written. Resume/transcript matching was NOT run.")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from io import BytesIO
 from urllib.parse import urlparse
 
 import httpx
+from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
 from career_agent.models.email import EmailMessage
@@ -11,7 +12,6 @@ from career_agent.models.job_record import SourceDocument
 from career_agent.nodes.normalize_email import (
     extract_links_from_html,
     extract_links_from_text,
-    html_to_text,
 )
 
 MAX_LINKED_PDFS = 8
@@ -36,6 +36,29 @@ def _looks_like_pdf(url: str) -> bool:
     except ValueError:
         return False
     return parsed.path.lower().endswith(".pdf")
+
+
+def _html_to_text_with_links(html: str) -> str:
+    """Convert HTML to readable text without throwing away anchor destinations."""
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "svg"]):
+        tag.decompose()
+
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        label = " ".join(anchor.get_text(" ", strip=True).split())
+        if not href:
+            continue
+        replacement = f"{label} <{href}>" if label else f"<{href}>"
+        anchor.replace_with(replacement)
+
+    return "\n".join(
+        line.strip()
+        for line in soup.get_text("\n").splitlines()
+        if line.strip()
+    )
 
 
 def _pdf_text(raw: bytes) -> str:
@@ -67,29 +90,31 @@ def build_source_corpus(
 ) -> tuple[str, list[str], list[SourceDocument], list[str]]:
     """Build one extraction corpus from every useful representation of an email.
 
-    Forwarded mail can expose a short recovered plain-text payload while still
-    retaining a much richer HTML body. We deliberately consider both. PDF
-    attachments parsed by the Graph connector are included, as are public PDF
-    links such as NUS CFG eNews booklets.
+    The richest email representation is used once, avoiding duplicate token spend
+    on nearly identical plain/HTML bodies. Public PDF links are appended as extra
+    source documents when available.
     """
     warnings: list[str] = []
     blocks: list[str] = []
     documents: list[SourceDocument] = []
 
     plain = (email.body_text or "").strip()
-    html_text = html_to_text(email.body_html or "").strip()
+    html_text = _html_to_text_with_links(email.body_html or "").strip()
     attachment_text = (email.attachment_text or "").strip()
 
-    if plain:
-        blocks.append(f"SOURCE: RECOVERED EMAIL TEXT\n{plain}")
-        documents.append(
-            SourceDocument(label="recovered email text", source_type="email", text_chars=len(plain))
-        )
+    # Forwarded HTML often contains everything in the recovered plain payload plus
+    # richer tables and href targets. Prefer it when it is comparably large.
+    if html_text and len(html_text) >= max(300, int(len(plain) * 0.8)):
+        email_text = html_text
+        label = "full email html"
+    else:
+        email_text = plain or html_text
+        label = "recovered email text" if plain else "full email html"
 
-    if html_text and html_text != plain:
-        blocks.append(f"SOURCE: FULL EMAIL HTML AS TEXT\n{html_text}")
+    if email_text:
+        blocks.append(f"SOURCE: EMAIL\n{email_text}")
         documents.append(
-            SourceDocument(label="full email html", source_type="email", text_chars=len(html_text))
+            SourceDocument(label=label, source_type="email", text_chars=len(email_text))
         )
 
     if attachment_text:

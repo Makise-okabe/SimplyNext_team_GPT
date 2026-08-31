@@ -34,10 +34,11 @@ def main() -> None:
         print("SIMPLYNEXT — INCREMENTAL INBOX BASELINE")
         print("=" * 88)
         print("Current inbox messages marked as seen:", len(checkpoint.seen_message_ids))
+        print("Baseline at (UTC)                    :", checkpoint.baseline_at)
         print("Checkpoint updated at                :", checkpoint.updated_at)
         print("No email content was processed.")
         print("\nNow send your test emails, then run:")
-        print("uv run python scripts/run_incremental_inbox.py --run")
+        print("uv run python scripts/run_incremental_inbox.py --run --dry-run")
         return
 
     result = scan_new_career_emails(
@@ -62,6 +63,11 @@ def main() -> None:
 
     for index, record in enumerate(result.records, start=1):
         email = record.email
+        body_chars = len(email.body_text or email.body_html or "")
+        outlook_link = next(
+            (url for url in email.links if "outlook.live.com" in url.lower()),
+            None,
+        )
         print("\n" + "-" * 88)
         print(f"CAREER EMAIL RECORD {index}/{len(result.records)}")
         print("source key      :", record.source)
@@ -72,8 +78,11 @@ def main() -> None:
         print("transport sender:", email.transport_sender_email or "None")
         print("attachments     :", "; ".join(email.attachments) or "None")
         print("attachment text :", len(email.attachment_text), "chars")
-        print("body text       :", len(email.body_text), "chars")
+        print("body            :", body_chars, "chars")
         print("links           :", len(email.links))
+        print("Outlook link    :", outlook_link or "None")
+
+    print("\nStopped at CareerEmailRecord. Job extraction and matching are intentionally not run.")
 
 
 if __name__ == "__main__":

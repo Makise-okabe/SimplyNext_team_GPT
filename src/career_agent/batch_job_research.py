@@ -180,7 +180,7 @@ def _fetch_best_jd(package, source_context: str) -> tuple[str, str | None, str, 
             fetches += 1
             if _useful_jd_text(page.text, title):
                 return "fetched_official", page.final_url or package.official_job_url, page.text[:MAX_JD_TEXT_CHARS], warnings, fetches
-            warnings.append("official page returned insufficient JD text")
+            warnings.append("official job page returned only a shell/insufficient JD text; retained fallback context")
         except Exception as exc:
             fetches += 1
             warnings.append(f"official JD fetch failed: {type(exc).__name__}: {exc}")

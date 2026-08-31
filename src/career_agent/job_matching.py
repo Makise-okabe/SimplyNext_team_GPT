@@ -21,6 +21,14 @@ def _build_llm():
     ).with_structured_output(MatchResult)
 
 
+def _recommendation_for_score(score: int) -> str:
+    if score >= 85:
+        return "strong_match"
+    if score >= 65:
+        return "possible_match"
+    return "weak_match"
+
+
 def match_job(profile: StudentProfile, job: JobRecord) -> MatchResult:
     """Evaluate one matching-ready JobRecord against one student profile."""
     if not job.jd_text.strip():
@@ -60,9 +68,12 @@ JOB DESCRIPTION:
 """.strip()
 
     result = _build_llm().invoke(prompt)
-    # Keep source fields deterministic rather than trusting the LLM to reproduce URLs.
+    score = max(0, min(100, result.score))
+    # URLs and recommendation are deterministic outputs; the LLM only evaluates fit.
     return result.model_copy(
         update={
+            "score": score,
+            "recommendation": _recommendation_for_score(score),
             "company": job.company,
             "title": job.title,
             "jd_source_url": job.jd_source_url,

@@ -76,9 +76,13 @@ def _looks_like_employment_link(url: str) -> bool:
         return False
     lowered = url.lower()
     try:
-        host = urlparse(url).netloc.lower()
+        host = urlparse(url).netloc.lower().split(":", 1)[0]
     except ValueError:
         host = ""
+    # RFC-reserved example domains are used in unit tests and must never trigger
+    # a real network call.
+    if host == "example.com" or host.endswith(".example.com"):
+        return False
     return any(marker in host for marker in ATS_HOST_MARKERS) or any(
         marker in lowered for marker in EMPLOYMENT_URL_MARKERS
     )

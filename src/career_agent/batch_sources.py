@@ -90,9 +90,11 @@ def build_source_corpus(
 ) -> tuple[str, list[str], list[SourceDocument], list[str]]:
     """Build one extraction corpus from every useful representation of an email.
 
-    The richest email representation is used once, avoiding duplicate token spend
-    on nearly identical plain/HTML bodies. Public PDF links are appended as extra
-    source documents when available.
+    Use exactly one primary email representation to avoid duplicate token spend.
+    Forwarded Outlook messages can leave a very short recovered ``body_text`` while
+    retaining the complete newsletter in ``body_html``. We therefore choose the
+    representation with more useful text rather than blindly preferring plain text.
+    Anchor destinations are preserved in the HTML-derived text.
     """
     warnings: list[str] = []
     blocks: list[str] = []
@@ -102,9 +104,10 @@ def build_source_corpus(
     html_text = _html_to_text_with_links(email.body_html or "").strip()
     attachment_text = (email.attachment_text or "").strip()
 
-    # Forwarded HTML often contains everything in the recovered plain payload plus
-    # richer tables and href targets. Prefer it when it is comparably large.
-    if html_text and len(html_text) >= max(300, int(len(plain) * 0.8)):
+    # Choose the richer representation once. This fixes forwarded newsletters
+    # where recover_forwarded_email creates a short plain payload but the original
+    # Graph HTML still contains the full table, job names, and href targets.
+    if html_text and len(html_text) > len(plain):
         email_text = html_text
         label = "full email html"
     else:
@@ -120,7 +123,11 @@ def build_source_corpus(
     if attachment_text:
         blocks.append(f"SOURCE: EMAIL ATTACHMENTS\n{attachment_text}")
         documents.append(
-            SourceDocument(label="email attachments", source_type="attachment", text_chars=len(attachment_text))
+            SourceDocument(
+                label="email attachments",
+                source_type="attachment",
+                text_chars=len(attachment_text),
+            )
         )
 
     links = _dedupe(

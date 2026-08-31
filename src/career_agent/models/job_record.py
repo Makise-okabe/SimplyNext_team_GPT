@@ -15,6 +15,11 @@ JDStatus = Literal[
     "source_context_only",
     "unavailable",
 ]
+AvailabilityStatus = Literal[
+    "active_candidate",
+    "expired_by_source_deadline",
+    "unknown",
+]
 
 
 class SourceDocument(BaseModel):
@@ -27,8 +32,9 @@ class SourceDocument(BaseModel):
 class JobRecord(BaseModel):
     """Job-side contract that a future matching agent can consume.
 
-    V6 keeps both provenance/research state and the best available raw JD text.
-    Structured matching features can be derived later without re-reading Outlook.
+    Research identity/authenticity and source-side availability are intentionally
+    separate. A trusted NUS email can prove that a role was circulated even when
+    the source deadline has already passed.
     """
 
     source_message_id: str
@@ -40,6 +46,8 @@ class JobRecord(BaseModel):
     location: str | None = None
     opportunity_type: OpportunityType = "unknown"
     deadline_hint: date | None = None
+    availability_status: AvailabilityStatus = "unknown"
+    research_skipped_reason: str | None = None
     target_major: list[str] = Field(default_factory=list)
     target_degree_level: list[str] = Field(default_factory=list)
     source_urls: list[str] = Field(default_factory=list)

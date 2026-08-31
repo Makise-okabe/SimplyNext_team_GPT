@@ -41,7 +41,6 @@ def _looks_like_pdf(url: str) -> bool:
 
 
 def _fragment_text_with_links(fragment) -> str:
-    """Render one HTML fragment compactly while retaining anchor destinations."""
     clone = BeautifulSoup(str(fragment), "html.parser")
     for tag in clone(["script", "style", "noscript", "svg"]):
         tag.decompose()
@@ -55,16 +54,21 @@ def _fragment_text_with_links(fragment) -> str:
     return " ".join(clone.get_text(" ", strip=True).split())
 
 
-def _html_to_text_with_links(html: str) -> str:
-    """Convert HTML to readable text while preserving table row boundaries.
+def _rows_belonging_to_table(table) -> list:
+    """Return rows whose nearest ancestor table is exactly ``table``.
 
-    Career newsletters often encode company/role/ID/remarks in HTML tables. A
-    normal ``get_text`` call destroys those column boundaries and can make an LLM
-    attach the next row's title to the previous company. Each table row is
-    therefore serialized as one pipe-delimited line before the remaining HTML is
-    flattened. ``rowspan`` cells naturally disappear from later rows; the
-    deterministic parser handles that by carrying forward the current company.
+    This includes normal ``table > tbody > tr`` markup while excluding rows of a
+    nested table that belongs to a cell.
     """
+    rows = []
+    for row in table.find_all("tr"):
+        if row.find_parent("table") is table:
+            rows.append(row)
+    return rows
+
+
+def _html_to_text_with_links(html: str) -> str:
+    """Convert HTML to readable text while preserving table row boundaries."""
     if not html:
         return ""
 
@@ -72,11 +76,18 @@ def _html_to_text_with_links(html: str) -> str:
     for tag in soup(["script", "style", "noscript", "svg"]):
         tag.decompose()
 
-    # Replace inner tables first so nested markup cannot be rendered twice.
     for table in reversed(soup.find_all("table")):
         rows: list[str] = []
-        for row in table.find_all("tr", recursive=False):
+        for row in _rows_belonging_to_table(table):
             cells = row.find_all(["th", "td"], recursive=False)
+            if not cells:
+                # Cells can be direct children of a row even when BeautifulSoup
+                # inserted wrapper markup around malformed newsletter HTML.
+                cells = [
+                    cell
+                    for cell in row.find_all(["th", "td"])
+                    if cell.find_parent("tr") is row
+                ]
             if not cells:
                 continue
             values = [_fragment_text_with_links(cell) for cell in cells]
@@ -138,14 +149,6 @@ def build_source_corpus(
     *,
     fetch_linked_pdfs: bool = True,
 ) -> tuple[str, list[str], list[SourceDocument], list[str]]:
-    """Build one extraction corpus from every useful representation of an email.
-
-    Use exactly one primary email representation to avoid duplicate token spend.
-    Forwarded Outlook messages can leave a very short recovered ``body_text`` while
-    retaining the complete newsletter in ``body_html``. We therefore choose the
-    representation with more useful text rather than blindly preferring plain text.
-    Anchor destinations and HTML table boundaries are preserved.
-    """
     warnings: list[str] = []
     blocks: list[str] = []
     documents: list[SourceDocument] = []

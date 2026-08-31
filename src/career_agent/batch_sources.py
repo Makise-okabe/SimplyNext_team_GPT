@@ -117,13 +117,40 @@ def _html_to_text_with_links(html: str) -> str:
     return "\n".join(lines)
 
 
-def _pdf_text(raw: bytes) -> str:
+def _pdf_uri_links(reader: PdfReader) -> list[str]:
+    """Extract HTTP(S) URI actions from PDF annotations without OCR."""
+    urls: list[str] = []
+    for page in reader.pages:
+        annotations = page.get("/Annots") or []
+        for annotation_ref in annotations:
+            try:
+                annotation = annotation_ref.get_object()
+                action = annotation.get("/A")
+                if action is None:
+                    continue
+                if hasattr(action, "get_object"):
+                    action = action.get_object()
+                uri = action.get("/URI") if hasattr(action, "get") else None
+                if uri:
+                    value = str(uri).strip()
+                    if _is_http(value):
+                        urls.append(value)
+            except Exception:
+                # One malformed annotation must not make the whole newsletter fail.
+                continue
+    return _dedupe(urls)
+
+
+def _pdf_text_and_links(raw: bytes) -> tuple[str, list[str]]:
     reader = PdfReader(BytesIO(raw))
     text = "\n".join((page.extract_text() or "") for page in reader.pages)
-    return text[:MAX_PDF_TEXT_CHARS].strip()
+    return text[:MAX_PDF_TEXT_CHARS].strip(), _pdf_uri_links(reader)
 
 
-def _fetch_linked_pdf(url: str, timeout_seconds: float = 15.0) -> str:
+def _fetch_linked_pdf(
+    url: str,
+    timeout_seconds: float = 15.0,
+) -> tuple[str, list[str]]:
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; SimplyNextCareerAgent/0.1)"
     }
@@ -136,7 +163,7 @@ def _fetch_linked_pdf(url: str, timeout_seconds: float = 15.0) -> str:
         content_type = response.headers.get("content-type", "").lower()
         if "pdf" not in content_type and not raw.startswith(b"%PDF"):
             raise ValueError("linked resource is not a PDF")
-    return _pdf_text(raw)
+    return _pdf_text_and_links(raw)
 
 
 def build_source_corpus(
@@ -188,7 +215,7 @@ def build_source_corpus(
         pdf_urls = [url for url in links if _is_http(url) and _looks_like_pdf(url)][:MAX_LINKED_PDFS]
         for url in pdf_urls:
             try:
-                text = _fetch_linked_pdf(url)
+                text, embedded_links = _fetch_linked_pdf(url)
             except Exception as exc:
                 warnings.append(
                     f"linked PDF unavailable: {url}: {type(exc).__name__}: {exc}"
@@ -197,7 +224,18 @@ def build_source_corpus(
             if not text:
                 warnings.append(f"linked PDF contained no extractable text: {url}")
                 continue
-            blocks.append(f"SOURCE: LINKED PDF\nURL: {url}\n{text}")
+
+            embedded_links = _dedupe(embedded_links)
+            links = _dedupe([*links, *embedded_links])
+            link_block = ""
+            if embedded_links:
+                link_block = "\nPDF EMBEDDED LINKS:\n" + "\n".join(
+                    f"<{embedded}>" for embedded in embedded_links
+                )
+
+            blocks.append(
+                f"SOURCE: LINKED PDF\nURL: {url}\n{text}{link_block}"
+            )
             documents.append(
                 SourceDocument(
                     label=urlparse(url).path.rsplit("/", 1)[-1] or "linked PDF",

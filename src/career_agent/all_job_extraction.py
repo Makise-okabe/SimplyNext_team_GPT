@@ -20,6 +20,7 @@ MIN_RETRY_CHARS = 1400
 
 SECTION_JOBS = "jobs"
 SECTION_INTERNSHIPS = "internships"
+SECTION_EVENTS = "events"
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,17 @@ def _clean_cell(value: str) -> str:
     value = value.replace("**", "").replace("__", "")
     value = re.sub(r"\s+", " ", value)
     return value.strip(" |\t\r\n")
+
+
+def _clean_company_cell(value: str) -> str:
+    """Remove explanatory prose accidentally embedded in a rowspan company cell."""
+    value = _clean_cell(value).strip("* _")
+    # Example from the Goh newsletter:
+    # "OPPO * for the roles in Qianhai, the candidates will be based ..."
+    match = re.search(r"(?i)\s+\*?\s*for\s+the\s+roles\s+in\b", value)
+    if match:
+        value = value[: match.start()].strip("* _")
+    return value
 
 
 def _chunks(text: str) -> list[str]:
@@ -100,8 +112,8 @@ Return every concrete opportunity explicitly named in this chunk, including:
 - graduate/academy/management-associate programmes that lead to employment
 
 Do NOT return:
+- events, career fairs, talks, workshops, seminars, competitions, or challenges
 - generic career advice/articles
-- career fairs/workshops/seminars unless an actual named job/programme is stated
 - company names without a role/programme title
 - social links or generic home pages by themselves
 
@@ -149,8 +161,6 @@ def _invoke_with_adaptive_retry(
 
 
 def _parse_date_hint(text: str):
-    # Keep this conservative. The downstream system can retain the raw remarks
-    # even when a natural-language deadline is not normalized here.
     patterns = (
         r"(?i)deadline\s*:\s*(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(20\d{2})",
         r"(?i)deadline\s*:\s*(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{2})",
@@ -180,6 +190,52 @@ def _location_from_remarks(text: str) -> str | None:
     return value or None
 
 
+def _looks_like_identifier(value: str) -> bool:
+    cleaned = re.sub(r"(?i)^TC\s*:\s*", "", _clean_cell(value))
+    cleaned = cleaned.replace(" ", "")
+    return bool(re.fullmatch(r"(?:\d{5,8}|NA|N/A)", cleaned, flags=re.IGNORECASE))
+
+
+def _row_fields(
+    cells: list[str],
+    *,
+    carried_company: str | None,
+) -> tuple[str | None, str | None, str] | None:
+    """Resolve standard and rowspan-compressed newsletter rows.
+
+    Standard rows are ``industry | company | role | id | remarks``. HTML rowspan
+    cells can make continuation rows contain only ``role | id | remarks`` or
+    ``company | role | id | remarks``. We use the identifier column as the stable
+    anchor rather than guessing from role wording.
+    """
+    cells = [_clean_cell(cell) for cell in cells if _clean_cell(cell)]
+    if not cells:
+        return None
+
+    joined = " | ".join(cells)
+    lowered = joined.lower()
+    if "company" in lowered and ("role" in lowered or "event title" in lowered):
+        return None
+
+    # Full schema: industry | company | role | id | remarks...
+    if len(cells) >= 5 and _looks_like_identifier(cells[3]):
+        return _clean_company_cell(cells[1]), cells[2], " | ".join(cells[4:])
+
+    # Rowspan removed industry only: company | role | id | remarks...
+    if len(cells) >= 4 and _looks_like_identifier(cells[2]):
+        return _clean_company_cell(cells[0]), cells[1], " | ".join(cells[3:])
+
+    # Rowspan removed industry + company: role | id | remarks...
+    if len(cells) >= 3 and _looks_like_identifier(cells[1]) and carried_company:
+        return carried_company, cells[0], " | ".join(cells[2:])
+
+    # Less common: industry remains but company is rowspanned away.
+    if len(cells) >= 4 and _looks_like_identifier(cells[2]) and carried_company:
+        return carried_company, cells[1], " | ".join(cells[3:])
+
+    return None
+
+
 def _table_row_signal(
     *,
     source_name: str,
@@ -187,38 +243,33 @@ def _table_row_signal(
     source_date,
     section: str,
     cells: list[str],
-) -> OpportunitySignal | None:
-    cells = [_clean_cell(cell) for cell in cells]
-    if len(cells) < 4:
-        return None
+    carried_company: str | None = None,
+) -> tuple[OpportunitySignal | None, str | None]:
+    resolved = _row_fields(cells, carried_company=carried_company)
+    if resolved is None:
+        return None, carried_company
 
-    joined = " | ".join(cells)
-    lowered = joined.lower()
-    if "company" in lowered and "role" in lowered:
-        return None
-    if set(joined.replace("|", "").replace("-", "").strip()) == set():
-        return None
-
-    # Standard Goh/CFG table schema:
-    # INDUSTRY | COMPANY | ROLE | TC ID | REMARKS
-    company = cells[1] if len(cells) >= 5 else None
-    role = cells[2] if len(cells) >= 5 else None
-    remarks = " | ".join(cells[4:]) if len(cells) >= 5 else ""
-
+    company, role, remarks = resolved
     if not company or not role:
-        return None
+        return None, carried_company
+
+    company = _clean_company_cell(company)
+    role = _clean_cell(role)
     if company.lower() in {"company", "-", "—"} or role.lower().startswith("role"):
-        return None
+        return None, carried_company
 
     urls = extract_links_from_text(role)
     role_without_urls = re.sub(r"<https?://[^>]+>", "", role).strip()
     role_without_urls = re.sub(r"\s+", " ", role_without_urls)
+    if not role_without_urls:
+        return None, company
 
     opportunity_type = "internship" if section == SECTION_INTERNSHIPS else "full_time"
     if "intern" in role_without_urls.lower() or "internship" in remarks.lower():
         opportunity_type = "internship"
 
-    return OpportunitySignal(
+    raw_cells = [_clean_cell(cell) for cell in cells]
+    signal = OpportunitySignal(
         source_type="outlook",
         source_name=source_name,
         source_message_id=source_message_id,
@@ -229,9 +280,10 @@ def _table_row_signal(
         opportunity_type=opportunity_type,
         deadline_hint=_parse_date_hint(remarks),
         urls=urls,
-        raw_text=joined,
+        raw_text=" | ".join(raw_cells),
         resolution_status="unresolved",
     )
+    return signal, company
 
 
 def _extract_structured_tables(
@@ -241,49 +293,72 @@ def _extract_structured_tables(
     source_date,
     corpus: str,
 ) -> tuple[list[OpportunitySignal], str]:
-    """Parse marked HTML newsletter tables and remove them from LLM input."""
+    """Parse job/internship tables, suppress event sections, leave prose/PDF for LLM."""
     lines = corpus.splitlines()
     signals: list[OpportunitySignal] = []
     residual: list[str] = []
     in_table = False
     section = ""
+    carried_company: str | None = None
 
     for raw_line in lines:
         line = raw_line.strip()
         upper = re.sub(r"[^A-Z]", "", line.upper())
+
+        if "================SOURCEDOCUMENT================" in upper:
+            # A linked PDF is a fresh source document and should still be eligible
+            # for LLM extraction even if the email itself ended in an EVENTS section.
+            section = ""
+            carried_company = None
+            residual.append(raw_line)
+            continue
         if upper == "JOBS":
             section = SECTION_JOBS
-            residual.append(raw_line)
+            carried_company = None
             continue
         if upper == "INTERNSHIPS":
             section = SECTION_INTERNSHIPS
-            residual.append(raw_line)
+            carried_company = None
+            continue
+        if upper == "EVENTS":
+            section = SECTION_EVENTS
+            carried_company = None
             continue
 
         if line == TABLE_START:
             in_table = True
+            carried_company = None
             continue
         if line == TABLE_END:
             in_table = False
-            residual.append("[[STRUCTURED_TABLE_PARSED]]")
+            carried_company = None
+            if section in {SECTION_JOBS, SECTION_INTERNSHIPS}:
+                residual.append("[[STRUCTURED_JOB_TABLE_PARSED]]")
             continue
 
-        if not in_table:
-            residual.append(raw_line)
+        if in_table:
+            if section not in {SECTION_JOBS, SECTION_INTERNSHIPS}:
+                # EVENTS and unrelated tables are not employment opportunities.
+                continue
+            cells = [cell.strip() for cell in raw_line.split("|")]
+            signal, carried_company = _table_row_signal(
+                source_name=source_name,
+                source_message_id=source_message_id,
+                source_date=source_date,
+                section=section,
+                cells=cells,
+                carried_company=carried_company,
+            )
+            if signal is not None:
+                signals.append(signal)
             continue
 
-        if section not in {SECTION_JOBS, SECTION_INTERNSHIPS}:
+        # After an EVENTS heading, suppress the rest of that email event section.
+        # A later source-document separator resets ``section`` above.
+        if section == SECTION_EVENTS:
             continue
-        cells = [cell.strip() for cell in raw_line.split("|")]
-        signal = _table_row_signal(
-            source_name=source_name,
-            source_message_id=source_message_id,
-            source_date=source_date,
-            section=section,
-            cells=cells,
-        )
-        if signal is not None:
-            signals.append(signal)
+
+        residual.append(raw_line)
 
     return signals, "\n".join(residual)
 
@@ -351,7 +426,6 @@ def extract_all_opportunities(
     llm_calls = 0
 
     for index, chunk in enumerate(chunks, start=1):
-        # Skip tiny residual scaffolding that cannot contain a useful opportunity.
         if len(chunk.strip()) < 180:
             continue
         chunk_items, chunk_calls, chunk_errors = _invoke_with_adaptive_retry(chunk)

@@ -80,13 +80,6 @@ def _seed_direct_url_from_company_hosts(
     signal: OpportunitySignal,
     official_hosts: list[str],
 ) -> tuple[OpportunitySignal, int, list[str]]:
-    """Use a company's already-known careers host to resolve later roles cheaply.
-
-    The first role for a company discovers/validates its official host through V5.
-    Later roles do one narrow site search instead of rediscovering the company
-    domain through broad search rounds. A URL is seeded only when title metadata
-    strongly agrees and the URL itself looks like a concrete job detail page.
-    """
     if signal.urls or not signal.role_title or not official_hosts:
         return signal, 0, []
 
@@ -221,7 +214,15 @@ def research_career_email_record(
     record: CareerEmailRecord,
     *,
     fetch_linked_pdfs: bool = True,
+    job_limit: int | None = None,
 ) -> EmailOpportunityResearchResult:
+    """Extract every opportunity, then optionally research only a bounded smoke-test subset.
+
+    ``opportunities`` always contains the complete extraction result. ``job_records``
+    contains every researched job unless ``job_limit`` is supplied, in which case
+    only the first N opportunities (preserving email order) are researched. This is
+    a development throttle only; the research logic is identical to the full run.
+    """
     email = record.email
     corpus, source_links, documents, source_warnings = build_source_corpus(
         email,
@@ -242,8 +243,14 @@ def research_career_email_record(
         }
     )
 
+    research_opportunities = opportunities
+    if job_limit is not None:
+        if job_limit < 1:
+            raise ValueError("job_limit must be >= 1 when provided")
+        research_opportunities = opportunities[:job_limit]
+
     groups: dict[str, list[tuple[int, OpportunitySignal]]] = defaultdict(list)
-    for index, signal in enumerate(opportunities, start=1):
+    for index, signal in enumerate(research_opportunities, start=1):
         key = " ".join((signal.company or "unknown").lower().split())
         groups[key].append((index, signal))
 
@@ -312,13 +319,18 @@ def research_career_email_record(
             warnings.extend(jd_warnings)
             errors.extend(package.errors)
 
+    all_company_keys = {
+        " ".join((signal.company or "unknown").lower().split())
+        for signal in opportunities
+    }
+
     return EmailOpportunityResearchResult(
         source_key=record.source,
         source_message_id=email.message_id,
         source_subject=email.subject,
         source_documents=documents,
         opportunities=opportunities,
-        company_count=len(groups),
+        company_count=len(all_company_keys),
         job_records=job_records,
         extraction_llm_calls=extraction_metrics.llm_calls,
         extraction_source_chars=extraction_metrics.source_chars,

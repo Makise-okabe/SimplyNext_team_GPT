@@ -96,3 +96,42 @@ def test_all_job_extraction_splits_multiple_roles_and_deduplicates_overlap(monke
     assert metrics.llm_calls == calls["count"]
     assert metrics.source_chars == len(corpus)
     assert errors == []
+
+
+def test_failed_dense_chunk_is_adaptively_split_and_recovered(monkeypatch) -> None:
+    calls: list[int] = []
+
+    def fake_invoke(chunk: str) -> ExtractedOpportunityBatch:
+        calls.append(len(chunk))
+        if len(chunk) > 4000:
+            raise RuntimeError("Failed to parse tool call arguments as JSON")
+        title = "Associate, Singapore (2027)" if "LEFTROLE" in chunk else "Consultant, Singapore (2027)"
+        return ExtractedOpportunityBatch(
+            opportunities=[
+                ExtractedOpportunity(
+                    company="BCG",
+                    role_title=title,
+                    opportunity_type="full_time",
+                    evidence_text=f"BCG - {title}",
+                )
+            ]
+        )
+
+    monkeypatch.setattr(all_job_extraction, "_invoke", fake_invoke)
+
+    corpus = ("LEFTROLE BCG careers\n" * 170) + ("RIGHTROLE BCG careers\n" * 170)
+    opportunities, metrics, errors = all_job_extraction.extract_all_opportunities(
+        source_name="Goh Ze Li",
+        source_message_id="m4",
+        source_date=None,
+        corpus=corpus,
+    )
+
+    assert {item.role_title for item in opportunities} == {
+        "Associate, Singapore (2027)",
+        "Consultant, Singapore (2027)",
+    }
+    assert metrics.llm_calls == len(calls)
+    assert any(size > 4000 for size in calls)
+    assert any(size <= 4000 for size in calls)
+    assert errors == []

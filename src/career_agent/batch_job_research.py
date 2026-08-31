@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict
+from datetime import date
 from urllib.parse import urlparse
 
 from career_agent.all_job_extraction import extract_all_opportunities
@@ -21,6 +22,8 @@ from career_agent.tools.web_fetch import fetch_public_page
 from career_agent.tools.web_search import search_public_web
 
 MAX_JD_TEXT_CHARS = 30_000
+MIN_USEFUL_JD_CHARS = 500
+MIN_JD_TITLE_OVERLAP = 0.30
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 
 
@@ -157,15 +160,23 @@ def _source_context(email: EmailMessage, signal: OpportunitySignal, radius: int 
     return (signal.raw_text or text[: radius * 2]).strip()
 
 
+def _useful_jd_text(text: str, title: str | None) -> bool:
+    cleaned = " ".join((text or "").split())
+    if len(cleaned) < MIN_USEFUL_JD_CHARS:
+        return False
+    return _title_overlap(title, cleaned) >= MIN_JD_TITLE_OVERLAP
+
+
 def _fetch_best_jd(package, source_context: str) -> tuple[str, str | None, str, list[str], int]:
     warnings: list[str] = []
     fetches = 0
+    title = package.identity.title
 
     if package.official_job_url:
         try:
             page = fetch_public_page(package.official_job_url)
             fetches += 1
-            if page.text.strip():
+            if _useful_jd_text(page.text, title):
                 return (
                     "fetched_official",
                     page.final_url or package.official_job_url,
@@ -173,7 +184,9 @@ def _fetch_best_jd(package, source_context: str) -> tuple[str, str | None, str, 
                     warnings,
                     fetches,
                 )
-            warnings.append("official job page returned no static text; retained source context")
+            warnings.append(
+                "official job page returned only a shell/insufficient JD text; retained fallback context"
+            )
         except Exception as exc:
             fetches += 1
             warnings.append(
@@ -185,7 +198,7 @@ def _fetch_best_jd(package, source_context: str) -> tuple[str, str | None, str, 
         try:
             page = fetch_public_page(url)
             fetches += 1
-            if page.text.strip():
+            if _useful_jd_text(page.text, title):
                 return (
                     "fetched_secondary",
                     page.final_url or url,
@@ -193,6 +206,9 @@ def _fetch_best_jd(package, source_context: str) -> tuple[str, str | None, str, 
                     warnings,
                     fetches,
                 )
+            warnings.append(
+                "secondary page returned insufficient role-specific JD text; retained source context"
+            )
         except Exception as exc:
             fetches += 1
             warnings.append(
@@ -210,18 +226,51 @@ def _fetch_best_jd(package, source_context: str) -> tuple[str, str | None, str, 
     return "unavailable", None, "", warnings, fetches
 
 
+def _is_expired(signal: OpportunitySignal, *, today: date | None = None) -> bool:
+    if signal.deadline_hint is None:
+        return False
+    return signal.deadline_hint < (today or date.today())
+
+
+def _expired_job_record(email: EmailMessage, signal: OpportunitySignal) -> JobRecord:
+    return JobRecord(
+        source_message_id=email.message_id,
+        source_sender_email=email.sender_email,
+        source_subject=email.subject,
+        company=signal.company,
+        title=signal.role_title,
+        location=signal.location,
+        opportunity_type=signal.opportunity_type,
+        deadline_hint=signal.deadline_hint,
+        availability_status="expired_by_source_deadline",
+        research_skipped_reason="source deadline has passed; expensive current-web research skipped",
+        target_major=signal.target_major,
+        target_degree_level=signal.target_degree_level,
+        source_urls=signal.urls,
+        record_kind="job_posting",
+        research_status="source_verified",
+        research_confidence="medium",
+        research_basis="trusted_nus_email_expired_source_deadline",
+        jd_status="unavailable",
+        source_evidence=signal.raw_text,
+        evidence_summary=[
+            "trusted NUS career source circulated this opportunity",
+            f"source deadline passed: {signal.deadline_hint.isoformat()}",
+        ],
+    )
+
+
 def research_career_email_record(
     record: CareerEmailRecord,
     *,
     fetch_linked_pdfs: bool = True,
     job_limit: int | None = None,
 ) -> EmailOpportunityResearchResult:
-    """Extract every opportunity, then optionally research only a bounded smoke-test subset.
+    """Extract all opportunities and research active/unknown-deadline jobs.
 
-    ``opportunities`` always contains the complete extraction result. ``job_records``
-    contains every researched job unless ``job_limit`` is supplied, in which case
-    only the first N opportunities (preserving email order) are researched. This is
-    a development throttle only; the research logic is identical to the full run.
+    Jobs whose explicit source deadline has already passed are preserved as
+    provenance-only JobRecords but skip web research. ``job_limit`` remains a
+    development throttle over email-order opportunities, not a different path.
     """
     email = record.email
     corpus, source_links, documents, source_warnings = build_source_corpus(
@@ -265,6 +314,10 @@ def research_career_email_record(
         company_hosts: list[str] = []
 
         for index, original_signal in company_items:
+            if _is_expired(original_signal):
+                job_records.append(_expired_job_record(email, original_signal))
+                continue
+
             signal, seed_calls, seed_warnings = _seed_direct_url_from_company_hosts(
                 original_signal,
                 company_hosts,
@@ -298,6 +351,7 @@ def research_career_email_record(
                     location=signal.location,
                     opportunity_type=signal.opportunity_type,
                     deadline_hint=signal.deadline_hint,
+                    availability_status="active_candidate" if signal.deadline_hint else "unknown",
                     target_major=signal.target_major,
                     target_degree_level=signal.target_degree_level,
                     source_urls=signal.urls,

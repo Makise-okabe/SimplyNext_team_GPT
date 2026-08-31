@@ -4,7 +4,7 @@ from io import BytesIO
 from urllib.parse import urlparse
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from pypdf import PdfReader
 
 from career_agent.models.email import EmailMessage
@@ -17,6 +17,8 @@ from career_agent.nodes.normalize_email import (
 MAX_LINKED_PDFS = 8
 MAX_PDF_BYTES = 12 * 1024 * 1024
 MAX_PDF_TEXT_CHARS = 120_000
+TABLE_START = "[[SIMPLYNEXT_TABLE_START]]"
+TABLE_END = "[[SIMPLYNEXT_TABLE_END]]"
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -38,27 +40,75 @@ def _looks_like_pdf(url: str) -> bool:
     return parsed.path.lower().endswith(".pdf")
 
 
+def _fragment_text_with_links(fragment) -> str:
+    """Render one HTML fragment compactly while retaining anchor destinations."""
+    clone = BeautifulSoup(str(fragment), "html.parser")
+    for tag in clone(["script", "style", "noscript", "svg"]):
+        tag.decompose()
+    for anchor in clone.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        label = " ".join(anchor.get_text(" ", strip=True).split())
+        if href:
+            anchor.replace_with(
+                f"{label} <{href}>" if label else f"<{href}>"
+            )
+    return " ".join(clone.get_text(" ", strip=True).split())
+
+
 def _html_to_text_with_links(html: str) -> str:
-    """Convert HTML to readable text without throwing away anchor destinations."""
+    """Convert HTML to readable text while preserving table row boundaries.
+
+    Career newsletters often encode company/role/ID/remarks in HTML tables. A
+    normal ``get_text`` call destroys those column boundaries and can make an LLM
+    attach the next row's title to the previous company. Each table row is
+    therefore serialized as one pipe-delimited line before the remaining HTML is
+    flattened. ``rowspan`` cells naturally disappear from later rows; the
+    deterministic parser handles that by carrying forward the current company.
+    """
     if not html:
         return ""
+
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript", "svg"]):
         tag.decompose()
 
+    # Replace inner tables first so nested markup cannot be rendered twice.
+    for table in reversed(soup.find_all("table")):
+        rows: list[str] = []
+        for row in table.find_all("tr", recursive=False):
+            cells = row.find_all(["th", "td"], recursive=False)
+            if not cells:
+                continue
+            values = [_fragment_text_with_links(cell) for cell in cells]
+            if any(values):
+                rows.append(" | ".join(values))
+        if rows:
+            table.replace_with(
+                NavigableString(
+                    "\n"
+                    + TABLE_START
+                    + "\n"
+                    + "\n".join(rows)
+                    + "\n"
+                    + TABLE_END
+                    + "\n"
+                )
+            )
+
     for anchor in soup.find_all("a", href=True):
         href = anchor.get("href", "").strip()
         label = " ".join(anchor.get_text(" ", strip=True).split())
-        if not href:
-            continue
-        replacement = f"{label} <{href}>" if label else f"<{href}>"
-        anchor.replace_with(replacement)
+        if href:
+            anchor.replace_with(
+                f"{label} <{href}>" if label else f"<{href}>"
+            )
 
-    return "\n".join(
+    lines = [
         line.strip()
         for line in soup.get_text("\n").splitlines()
         if line.strip()
-    )
+    ]
+    return "\n".join(lines)
 
 
 def _pdf_text(raw: bytes) -> str:
@@ -94,7 +144,7 @@ def build_source_corpus(
     Forwarded Outlook messages can leave a very short recovered ``body_text`` while
     retaining the complete newsletter in ``body_html``. We therefore choose the
     representation with more useful text rather than blindly preferring plain text.
-    Anchor destinations are preserved in the HTML-derived text.
+    Anchor destinations and HTML table boundaries are preserved.
     """
     warnings: list[str] = []
     blocks: list[str] = []
@@ -104,9 +154,6 @@ def build_source_corpus(
     html_text = _html_to_text_with_links(email.body_html or "").strip()
     attachment_text = (email.attachment_text or "").strip()
 
-    # Choose the richer representation once. This fixes forwarded newsletters
-    # where recover_forwarded_email creates a short plain payload but the original
-    # Graph HTML still contains the full table, job names, and href targets.
     if html_text and len(html_text) > len(plain):
         email_text = html_text
         label = "full email html"

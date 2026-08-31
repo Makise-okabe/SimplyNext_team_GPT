@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import defaultdict
+from urllib.parse import urlparse
 
 from career_agent.all_job_extraction import extract_all_opportunities
 from career_agent.batch_sources import build_source_corpus
-from career_agent.job_identity.concrete_job_research import research_concrete_job_or_delegate
+from career_agent.job_identity.concrete_job_research import (
+    _enhanced_job_like_url,
+    research_concrete_job_or_delegate,
+)
 from career_agent.models.email import EmailMessage
 from career_agent.models.inbox import CareerEmailRecord
 from career_agent.models.job_identity import JobIdentity
@@ -13,8 +18,10 @@ from career_agent.models.job_record import EmailOpportunityResearchResult, JobRe
 from career_agent.models.signal import OpportunitySignal
 from career_agent.nodes.normalize_email import html_to_text
 from career_agent.tools.web_fetch import fetch_public_page
+from career_agent.tools.web_search import search_public_web
 
 MAX_JD_TEXT_CHARS = 30_000
+TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 
 
 def _fingerprint(signal: OpportunitySignal) -> str:
@@ -49,6 +56,93 @@ def _identity_from_signal(signal: OpportunitySignal, index: int) -> JobIdentity:
         identity_strength="moderate" if signal.company and signal.role_title else "weak",
         source_fingerprint=_fingerprint(signal),
     )
+
+
+def _title_overlap(title: str | None, text: str) -> float:
+    source = {
+        token
+        for token in TOKEN_PATTERN.findall((title or "").lower())
+        if len(token) >= 3 or token.isdigit()
+    }
+    if not source:
+        return 0.0
+    target = set(TOKEN_PATTERN.findall(text.lower()))
+    return len(source & target) / len(source)
+
+
+def _host_matches(candidate_host: str, known_host: str) -> bool:
+    candidate_host = candidate_host.lower().split(":", 1)[0]
+    known_host = known_host.lower().split(":", 1)[0]
+    return candidate_host == known_host or candidate_host.endswith(f".{known_host}")
+
+
+def _seed_direct_url_from_company_hosts(
+    signal: OpportunitySignal,
+    official_hosts: list[str],
+) -> tuple[OpportunitySignal, int, list[str]]:
+    """Use a company's already-known careers host to resolve later roles cheaply.
+
+    The first role for a company discovers/validates its official host through V5.
+    Later roles do one narrow site search instead of rediscovering the company
+    domain through broad search rounds. A URL is seeded only when title metadata
+    strongly agrees and the URL itself looks like a concrete job detail page.
+    """
+    if signal.urls or not signal.role_title or not official_hosts:
+        return signal, 0, []
+
+    warnings: list[str] = []
+    calls = 0
+    location = signal.location or "Singapore"
+
+    for host in official_hosts[:2]:
+        query = f'site:{host} "{signal.role_title}" {location}'.strip()
+        try:
+            results = search_public_web(query, max_results=6)
+            calls += 1
+        except Exception as exc:
+            calls += 1
+            warnings.append(
+                f"company-session search failed for {host}: {type(exc).__name__}: {exc}"
+            )
+            continue
+
+        for result in results:
+            try:
+                candidate_host = urlparse(result.url).netloc.lower()
+            except ValueError:
+                continue
+            if not _host_matches(candidate_host, host):
+                continue
+            if not _enhanced_job_like_url(result.url):
+                continue
+            metadata = f"{result.title} {result.snippet} {result.url}"
+            if _title_overlap(signal.role_title, metadata) < 0.80:
+                continue
+            return (
+                signal.model_copy(
+                    update={"urls": list(dict.fromkeys([*signal.urls, result.url]))}
+                ),
+                calls,
+                warnings,
+            )
+
+    return signal, calls, warnings
+
+
+def _official_hosts_from_package(package) -> list[str]:
+    hosts: list[str] = []
+    if package.official_job_url:
+        try:
+            host = urlparse(package.official_job_url).netloc.lower()
+            if host:
+                hosts.append(host)
+        except ValueError:
+            pass
+
+    for candidate in package.candidates:
+        if candidate.tier == "official" and candidate.host:
+            hosts.append(candidate.host.lower())
+    return list(dict.fromkeys(hosts))
 
 
 def _source_context(email: EmailMessage, signal: OpportunitySignal, radius: int = 1800) -> str:
@@ -141,8 +235,6 @@ def research_career_email_record(
         corpus=corpus,
     )
 
-    # Preserve all public source URLs in the research email while keeping each
-    # opportunity's exact direct URLs separate.
     research_email = email.model_copy(
         update={
             "body_text": corpus,
@@ -162,15 +254,25 @@ def research_career_email_record(
     warnings = list(source_warnings)
     errors = list(extraction_errors)
 
-    # Company grouping is explicit even before deeper cross-role company-context
-    # reuse is added. This gives one stable grouping boundary for later caching.
     for _, company_items in groups.items():
-        for index, signal in company_items:
+        company_hosts: list[str] = []
+
+        for index, original_signal in company_items:
+            signal, seed_calls, seed_warnings = _seed_direct_url_from_company_hosts(
+                original_signal,
+                company_hosts,
+            )
+            search_calls += seed_calls
+            warnings.extend(seed_warnings)
+
             identity = _identity_from_signal(signal, index)
             package = research_concrete_job_or_delegate(identity, research_email)
             search_calls += package.metrics.search_calls
             page_fetch_calls += package.metrics.fetch_calls
             judge_llm_calls += package.metrics.judge_llm_calls
+
+            discovered_hosts = _official_hosts_from_package(package)
+            company_hosts = list(dict.fromkeys([*company_hosts, *discovered_hosts]))
 
             context = _source_context(research_email, signal)
             jd_status, jd_url, jd_text, jd_warnings, extra_fetches = _fetch_best_jd(

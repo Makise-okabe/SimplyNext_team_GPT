@@ -11,11 +11,19 @@ from dotenv import load_dotenv
 from career_agent.config import Settings
 from career_agent.connectors.base import EmailConnector
 from career_agent.models.email import EmailMessage
+from career_agent.models.inbox import CareerEmailRecord, IncrementalInboxResult
 from career_agent.parsers.attachments import extract_pdf_text, format_attachment_text
 from career_agent.parsers.forwarded_email import recover_forwarded_email
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 DEFAULT_SCOPES = ["User.Read", "Mail.Read"]
+
+CAREER_SOURCE_BY_SENDER = {
+    "zeli.goh@nus.edu.sg": "goh_ze_li",
+    "talentconnect@se.nus.edu.sg": "talentconnect",
+    # Keep compatibility with older TalentConnect messages seen during prototype work.
+    "no-reply@kinobi.asia": "talentconnect",
+}
 
 
 class OutlookGraphConnector(EmailConnector):
@@ -245,6 +253,55 @@ class OutlookGraphConnector(EmailConnector):
                 "attachments": attachment_names,
                 "attachment_text": "\n\n".join(text_blocks),
             }
+        )
+
+    def scan_incremental(
+        self,
+        *,
+        baseline_at: datetime,
+        seen_message_ids: set[str],
+        top: int = 100,
+        include_attachments: bool = True,
+    ) -> IncrementalInboxResult:
+        """Scan only mail newer than a manual bootstrap boundary.
+
+        Every unseen message is counted so irrelevant mail can be committed as
+        seen too. Forwarded sender recovery and trusted-source filtering happen
+        before attachment retrieval, so irrelevant mail stays cheap.
+        """
+        token = self._get_access_token()
+        items = self._list_recent_items(token, top=top)
+        unseen_items: list[dict] = []
+        records: list[CareerEmailRecord] = []
+
+        for item in items:
+            message_id = item.get("id") or ""
+            if not message_id or message_id in seen_message_ids:
+                continue
+
+            message = self._graph_item_to_message(item)
+            if not message.received_at or message.received_at <= baseline_at:
+                continue
+
+            unseen_items.append(item)
+            normalized = recover_forwarded_email(message)
+            sender = (normalized.sender_email or "").strip().lower()
+            source = CAREER_SOURCE_BY_SENDER.get(sender)
+            if source is None:
+                continue
+
+            if include_attachments and item.get("hasAttachments"):
+                normalized = self._enrich_attachments(normalized, token)
+
+            records.append(CareerEmailRecord(source=source, email=normalized))
+
+        return IncrementalInboxResult(
+            scanned_recent=len(items),
+            unseen_total=len(unseen_items),
+            filtered_out=len(unseen_items) - len(records),
+            records=records,
+            unseen_message_ids=[item.get("id") for item in unseen_items if item.get("id")],
+            checkpoint_committed=False,
         )
 
     def get_messages(

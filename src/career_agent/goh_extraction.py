@@ -17,22 +17,41 @@ def _clean(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "").replace("**", "").replace("__", "")).strip(" |")
 
 
-def _parse_deadline(text: str):
-    """Parse Goh deadline variants such as `5 th Dec 2025`, `30 Sep 26`, etc."""
-    pattern = re.compile(
+def _parse_deadline(text: str, source_date=None):
+    """Parse Goh deadline variants, including omitted current-year values like `31 Aug`."""
+    value = text or ""
+    explicit = re.search(
         r"(?i)deadline\s*:\s*(\d{1,2})\s*(?:st|nd|rd|th)?\s*"
         r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*"
-        r"(20\d{2}|\d{2})"
+        r"(20\d{2}|\d{2})",
+        value,
     )
-    match = pattern.search(text or "")
-    if not match:
+    if explicit:
+        day, month, year = explicit.groups()
+        if len(year) == 2:
+            year = "20" + year
+        try:
+            return datetime.strptime(f"{day} {month} {year}", "%d %b %Y").date()
+        except ValueError:
+            return None
+
+    implicit = re.search(
+        r"(?i)deadline\s*:\s*(\d{1,2})\s*(?:st|nd|rd|th)?\s*"
+        r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b",
+        value,
+    )
+    if not implicit or source_date is None:
         return None
-    day, month, year = match.groups()
-    if len(year) == 2:
-        year = "20" + year
+    day, month = implicit.groups()
     try:
-        return datetime.strptime(f"{day} {month} {year}", "%d %b %Y").date()
-    except ValueError:
+        source_year = source_date.year
+        parsed = datetime.strptime(f"{day} {month} {source_year}", "%d %b %Y").date()
+        # If an email is sent late in the year and a yearless deadline points far
+        # backwards (for example Dec email -> Jan deadline), interpret it as next year.
+        if (parsed - source_date.date()).days < -120:
+            parsed = parsed.replace(year=source_year + 1)
+        return parsed
+    except (ValueError, AttributeError):
         return None
 
 
@@ -134,7 +153,7 @@ def _structured_signals(
                         role_title=role,
                         location=_location(remarks),
                         opportunity_type=_opportunity_type(section, role, remarks),
-                        deadline_hint=_parse_deadline(remarks),
+                        deadline_hint=_parse_deadline(remarks, source_date),
                         urls=urls,
                         raw_text=" | ".join(cells),
                         resolution_status="unresolved",
@@ -173,9 +192,6 @@ def extract_goh_opportunities(
 
     merged: dict[tuple[str, str], OpportunitySignal] = {}
     for signal in base:
-        # Current Goh newsletters sometimes place several numbered roles in one
-        # table cell. Do not preserve the old combined-role artefact when the
-        # deterministic parser can expand it into individual jobs.
         if len(_split_numbered_roles(signal.role_title or "")) > 1:
             continue
         merged[_key(signal)] = signal

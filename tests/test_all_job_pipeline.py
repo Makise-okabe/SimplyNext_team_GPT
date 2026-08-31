@@ -188,3 +188,64 @@ def test_structured_jobs_and_internships_tables_are_parsed_without_llm(monkeypat
     assert metrics.llm_calls == 0
     assert warnings == []
     assert errors == []
+
+
+def test_rowspan_continuations_keep_company_and_events_are_excluded(monkeypatch) -> None:
+    html = """
+    <html><body>
+      <h3>JOBS</h3>
+      <table><tbody>
+        <tr><th>INDUSTRY</th><th>COMPANY</th><th>ROLE</th><th>TC ID</th><th>REMARKS</th></tr>
+        <tr>
+          <td>ICT</td>
+          <td rowspan='3'>OPPO * for the roles in Qianhai, candidates will be based in Shenzhen</td>
+          <td>Site Reliability Engineer</td><td>272792</td><td>Location: Singapore</td>
+        </tr>
+        <tr><td>[Qianhai] Intelligent Manufacturing Engineer (Process Direction)</td><td>275095</td><td>Location: Shenzhen, China</td></tr>
+        <tr><td>[Qianhai] Software Product Manager (Overseas)</td><td>275085</td><td>Location: Shenzhen, China</td></tr>
+      </tbody></table>
+      <h3>EVENTS</h3>
+      <table><tbody>
+        <tr><th>INDUSTRY</th><th>EVENT TITLE</th><th>DATE</th></tr>
+        <tr><td>Public Sector</td><td>MFA DIAL 2025 Day in a Life</td><td>9-10 Dec 2025</td></tr>
+      </tbody></table>
+      <p>Schneider Career Growth Days - 2025</p>
+      <p>Airbus Fly Your Ideas 2026 student innovation challenge</p>
+    </body></html>
+    """
+
+    email = EmailMessage(
+        message_id="m6",
+        sender_email="zeli.goh@nus.edu.sg",
+        subject="Industry Opportunities",
+        body_html=html,
+    )
+    corpus, _, _, warnings = batch_sources.build_source_corpus(
+        email,
+        fetch_linked_pdfs=False,
+    )
+
+    def no_llm(_chunk: str):
+        raise AssertionError("job table and event-only residual should not require LLM")
+
+    monkeypatch.setattr(all_job_extraction, "_invoke", no_llm)
+
+    opportunities, metrics, errors = all_job_extraction.extract_all_opportunities(
+        source_name="Goh Ze Li",
+        source_message_id="m6",
+        source_date=None,
+        corpus=corpus,
+    )
+
+    pairs = {(item.company, item.role_title): item for item in opportunities}
+    assert set(pairs) == {
+        ("OPPO", "Site Reliability Engineer"),
+        ("OPPO", "[Qianhai] Intelligent Manufacturing Engineer (Process Direction)"),
+        ("OPPO", "[Qianhai] Software Product Manager (Overseas)"),
+    }
+    assert pairs[("OPPO", "Site Reliability Engineer")].location == "Singapore"
+    assert pairs[("OPPO", "[Qianhai] Intelligent Manufacturing Engineer (Process Direction)")].location == "Shenzhen, China"
+    assert pairs[("OPPO", "[Qianhai] Software Product Manager (Overseas)")].location == "Shenzhen, China"
+    assert metrics.llm_calls == 0
+    assert warnings == []
+    assert errors == []

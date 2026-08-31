@@ -18,6 +18,7 @@ from career_agent.models.job_identity import JobIdentity
 from career_agent.models.job_record import EmailOpportunityResearchResult, JobRecord
 from career_agent.models.signal import OpportunitySignal
 from career_agent.nodes.normalize_email import html_to_text
+from career_agent.talentconnect_extraction import extract_talentconnect_opportunities
 from career_agent.tools.web_fetch import fetch_public_page
 from career_agent.tools.web_search import search_public_web
 
@@ -265,20 +266,19 @@ def research_career_email_record(
     *,
     fetch_linked_pdfs: bool = True,
 ) -> EmailOpportunityResearchResult:
-    """Extract and research every opportunity in one selected career email.
-
-    Explicitly expired source-deadline jobs are still emitted as provenance-only
-    JobRecords but skip expensive current-web research. Every other extracted
-    opportunity follows the same official-first research path; there is no
-    production truncation or first-N throttle.
-    """
+    """Read email/attachments, extract all leads, then research official originals."""
     email = record.email
     corpus, source_links, documents, source_warnings = build_source_corpus(
         email,
         fetch_linked_pdfs=fetch_linked_pdfs,
     )
 
-    opportunities, extraction_metrics, extraction_errors = extract_all_opportunities(
+    extraction_fn = (
+        extract_talentconnect_opportunities
+        if record.source == "talentconnect"
+        else extract_all_opportunities
+    )
+    opportunities, extraction_metrics, extraction_errors = extraction_fn(
         source_name=email.sender_name or email.sender_email or record.source,
         source_message_id=email.message_id,
         source_date=email.received_at,

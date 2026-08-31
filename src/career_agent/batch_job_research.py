@@ -264,13 +264,13 @@ def research_career_email_record(
     record: CareerEmailRecord,
     *,
     fetch_linked_pdfs: bool = True,
-    job_limit: int | None = None,
 ) -> EmailOpportunityResearchResult:
-    """Extract all opportunities and research active/unknown-deadline jobs.
+    """Extract and research every opportunity in one selected career email.
 
-    Jobs whose explicit source deadline has already passed are preserved as
-    provenance-only JobRecords but skip web research. ``job_limit`` remains a
-    development throttle over email-order opportunities, not a different path.
+    Explicitly expired source-deadline jobs are still emitted as provenance-only
+    JobRecords but skip expensive current-web research. Every other extracted
+    opportunity follows the same official-first research path; there is no
+    production truncation or first-N throttle.
     """
     email = record.email
     corpus, source_links, documents, source_warnings = build_source_corpus(
@@ -292,14 +292,8 @@ def research_career_email_record(
         }
     )
 
-    research_opportunities = opportunities
-    if job_limit is not None:
-        if job_limit < 1:
-            raise ValueError("job_limit must be >= 1 when provided")
-        research_opportunities = opportunities[:job_limit]
-
     groups: dict[str, list[tuple[int, OpportunitySignal]]] = defaultdict(list)
-    for index, signal in enumerate(research_opportunities, start=1):
+    for index, signal in enumerate(opportunities, start=1):
         key = " ".join((signal.company or "unknown").lower().split())
         groups[key].append((index, signal))
 

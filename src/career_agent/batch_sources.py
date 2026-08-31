@@ -20,6 +20,9 @@ MAX_PDF_TEXT_CHARS = 120_000
 TABLE_START = "[[SIMPLYNEXT_TABLE_START]]"
 TABLE_END = "[[SIMPLYNEXT_TABLE_END]]"
 SOURCE_DOCUMENT_SEPARATOR = "================ SOURCE DOCUMENT ================"
+PDF_PAGE_START = "[[SIMPLYNEXT_PDF_PAGE_START:"
+PDF_PAGE_LINKS = "[[SIMPLYNEXT_PDF_PAGE_LINKS]]"
+PDF_PAGE_END = "[[SIMPLYNEXT_PDF_PAGE_END]]"
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -56,7 +59,6 @@ def _fragment_text_with_links(fragment) -> str:
 
 
 def _rows_belonging_to_table(table) -> list:
-    """Return rows whose nearest ancestor table is exactly ``table``."""
     rows = []
     for row in table.find_all("tr"):
         if row.find_parent("table") is table:
@@ -65,7 +67,6 @@ def _rows_belonging_to_table(table) -> list:
 
 
 def _html_to_text_with_links(html: str) -> str:
-    """Convert HTML to readable text while preserving table row boundaries."""
     if not html:
         return ""
 
@@ -109,42 +110,64 @@ def _html_to_text_with_links(html: str) -> str:
                 f"{label} <{href}>" if label else f"<{href}>"
             )
 
-    lines = [
+    return "\n".join(
         line.strip()
         for line in soup.get_text("\n").splitlines()
         if line.strip()
-    ]
-    return "\n".join(lines)
+    )
 
 
-def _pdf_uri_links(reader: PdfReader) -> list[str]:
-    """Extract HTTP(S) URI actions from PDF annotations without OCR."""
+def _page_uri_links(page) -> list[str]:
+    """Read HTTP(S) link annotations from one PDF page."""
     urls: list[str] = []
-    for page in reader.pages:
-        annotations = page.get("/Annots") or []
-        for annotation_ref in annotations:
-            try:
-                annotation = annotation_ref.get_object()
-                action = annotation.get("/A")
-                if action is None:
-                    continue
-                if hasattr(action, "get_object"):
-                    action = action.get_object()
-                uri = action.get("/URI") if hasattr(action, "get") else None
-                if uri:
-                    value = str(uri).strip()
-                    if _is_http(value):
-                        urls.append(value)
-            except Exception:
-                # One malformed annotation must not make the whole newsletter fail.
+    annotations = page.get("/Annots") or []
+    for annotation_ref in annotations:
+        try:
+            annotation = annotation_ref.get_object()
+            action = annotation.get("/A")
+            if action is None:
                 continue
+            if hasattr(action, "get_object"):
+                action = action.get_object()
+            uri = action.get("/URI") if hasattr(action, "get") else None
+            if uri:
+                value = str(uri).strip()
+                if _is_http(value):
+                    urls.append(value)
+        except Exception:
+            continue
     return _dedupe(urls)
 
 
 def _pdf_text_and_links(raw: bytes) -> tuple[str, list[str]]:
+    """Open a PDF page-by-page and retain page-local hyperlinks.
+
+    The markers are intentionally plain text so the extraction layer can scan each
+    page independently without needing to persist the PDF or re-open its bytes.
+    """
     reader = PdfReader(BytesIO(raw))
-    text = "\n".join((page.extract_text() or "") for page in reader.pages)
-    return text[:MAX_PDF_TEXT_CHARS].strip(), _pdf_uri_links(reader)
+    blocks: list[str] = []
+    all_links: list[str] = []
+    text_budget = MAX_PDF_TEXT_CHARS
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        page_text = (page.extract_text() or "").strip()
+        page_links = _page_uri_links(page)
+        all_links.extend(page_links)
+
+        if text_budget <= 0 and not page_links:
+            continue
+        visible = page_text[: max(0, text_budget)]
+        text_budget -= len(visible)
+
+        block_lines = [f"{PDF_PAGE_START}{page_number}]]", visible]
+        if page_links:
+            block_lines.append(PDF_PAGE_LINKS)
+            block_lines.extend(f"<{url}>" for url in page_links)
+        block_lines.append(PDF_PAGE_END)
+        blocks.append("\n".join(line for line in block_lines if line != ""))
+
+    return "\n\n".join(blocks).strip(), _dedupe(all_links)
 
 
 def _fetch_linked_pdf(
@@ -227,15 +250,7 @@ def build_source_corpus(
 
             embedded_links = _dedupe(embedded_links)
             links = _dedupe([*links, *embedded_links])
-            link_block = ""
-            if embedded_links:
-                link_block = "\nPDF EMBEDDED LINKS:\n" + "\n".join(
-                    f"<{embedded}>" for embedded in embedded_links
-                )
-
-            blocks.append(
-                f"SOURCE: LINKED PDF\nURL: {url}\n{text}{link_block}"
-            )
+            blocks.append(f"SOURCE: LINKED PDF\nURL: {url}\n{text}")
             documents.append(
                 SourceDocument(
                     label=urlparse(url).path.rsplit("/", 1)[-1] or "linked PDF",

@@ -78,8 +78,6 @@ def test_all_job_extraction_splits_multiple_roles_and_deduplicates_overlap(monke
 
     monkeypatch.setattr(all_job_extraction, "_invoke", fake_invoke)
 
-    # Deliberately force overlapping chunks; the same two roles are returned from
-    # every chunk and must collapse to two final opportunities.
     corpus = "Goldilock careers " * 900
     opportunities, metrics, errors = all_job_extraction.extract_all_opportunities(
         source_name="Goh Ze Li",
@@ -134,4 +132,59 @@ def test_failed_dense_chunk_is_adaptively_split_and_recovered(monkeypatch) -> No
     assert metrics.llm_calls == len(calls)
     assert any(size > 4000 for size in calls)
     assert any(size <= 4000 for size in calls)
+    assert errors == []
+
+
+def test_structured_jobs_and_internships_tables_are_parsed_without_llm(monkeypatch) -> None:
+    html = """
+    <html><body>
+      <h3>JOBS</h3>
+      <table><tbody>
+        <tr><th>INDUSTRY</th><th>COMPANY</th><th>ROLE</th><th>TC ID</th><th>REMARKS</th></tr>
+        <tr><td>ICT</td><td>Amazon Singapore</td><td>Program Manager</td><td>1</td><td>Location: Singapore</td></tr>
+      </tbody></table>
+      <h3>INTERNSHIPS</h3>
+      <table><tbody>
+        <tr><th>INDUSTRY</th><th>COMPANY</th><th>ROLE</th><th>TC ID</th><th>REMARKS</th></tr>
+        <tr><td>ICT</td><td>Amazon Singapore</td><td>Program Manager Intern - AWS Cloud</td><td>2</td><td>Deadline: 24 Dec 25</td></tr>
+        <tr><td>ICT</td><td>BLACK SESAME TECHNOLOGIES (SINGAPORE) PTE LTD</td><td>AI Engineer</td><td>3</td><td>Deadline: 28 Dec 25</td></tr>
+        <tr><td>ICT</td><td>Google Asia Pacific Pte Ltd</td><td>Data Center Technician Intern, 2026</td><td>4</td><td>Summer Vacation</td></tr>
+        <tr><td>ICT</td><td>Mikomiko Pte Ltd</td><td>AI Engineer (Machine Learning)</td><td>5</td><td>Winter Vacation</td></tr>
+      </tbody></table>
+    </body></html>
+    """
+
+    email = EmailMessage(
+        message_id="m5",
+        sender_email="zeli.goh@nus.edu.sg",
+        subject="Industry Opportunities",
+        body_html=html,
+    )
+    corpus, _, _, warnings = batch_sources.build_source_corpus(
+        email,
+        fetch_linked_pdfs=False,
+    )
+
+    def no_llm(_chunk: str):
+        raise AssertionError("structured table rows should not require LLM extraction")
+
+    monkeypatch.setattr(all_job_extraction, "_invoke", no_llm)
+
+    opportunities, metrics, errors = all_job_extraction.extract_all_opportunities(
+        source_name="Goh Ze Li",
+        source_message_id="m5",
+        source_date=None,
+        corpus=corpus,
+    )
+
+    pairs = {(item.company, item.role_title): item for item in opportunities}
+    assert ("Amazon Singapore", "Program Manager") in pairs
+    assert pairs[("Amazon Singapore", "Program Manager")].opportunity_type == "full_time"
+    assert ("Amazon Singapore", "Program Manager Intern - AWS Cloud") in pairs
+    assert pairs[("Amazon Singapore", "Program Manager Intern - AWS Cloud")].opportunity_type == "internship"
+    assert ("BLACK SESAME TECHNOLOGIES (SINGAPORE) PTE LTD", "AI Engineer") in pairs
+    assert ("Google Asia Pacific Pte Ltd", "Data Center Technician Intern, 2026") in pairs
+    assert ("Mikomiko Pte Ltd", "AI Engineer (Machine Learning)") in pairs
+    assert metrics.llm_calls == 0
+    assert warnings == []
     assert errors == []

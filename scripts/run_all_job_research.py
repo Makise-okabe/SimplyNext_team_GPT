@@ -41,6 +41,12 @@ def main() -> None:
     parser.add_argument("--scan", type=int, default=30)
     parser.add_argument("--limit", type=int, default=2)
     parser.add_argument(
+        "--source",
+        choices=["goh_ze_li", "talentconnect"],
+        default=None,
+        help="Optionally select only one trusted career source before applying --limit.",
+    )
+    parser.add_argument(
         "--job-limit",
         type=int,
         default=None,
@@ -73,6 +79,8 @@ def main() -> None:
 
     connector = OutlookGraphConnector()
     messages = connector.get_messages(top=args.scan, include_attachments=True)
+    if args.source:
+        messages = [message for message in messages if _source_key(message.sender_email) == args.source]
     if args.subject:
         messages = [
             message
@@ -89,6 +97,8 @@ def main() -> None:
     )
     print("=" * 112)
     print("Trusted career emails selected:", len(messages))
+    if args.source:
+        print("Source filter               :", args.source)
     if not args.extract_only and args.job_limit is not None:
         print("Research throttle          : first", args.job_limit, "jobs per email")
 
@@ -169,6 +179,7 @@ def main() -> None:
     grand_companies: set[str] = set()
     grand_verified = 0
     grand_jd = 0
+    grand_expired = 0
     grand_searches = 0
     grand_fetches = 0
     grand_judges = 0
@@ -200,7 +211,7 @@ def main() -> None:
         print("  extraction LLM:", result.extraction_llm_calls)
         print("  source chars  :", result.extraction_source_chars)
         if args.job_limit is not None:
-            print("  researched now:", len(result.job_records), "of", len(result.opportunities))
+            print("  selected now  :", len(result.job_records), "of", len(result.opportunities))
 
         grouped: dict[str, list] = defaultdict(list)
         for job in result.job_records:
@@ -209,13 +220,21 @@ def main() -> None:
         for company, jobs in grouped.items():
             print("\n  " + company)
             for job in jobs:
-                status_mark = "✓" if job.research_status == "verified_exact_job" else "?"
+                if job.availability_status == "expired_by_source_deadline":
+                    status_mark = "×"
+                elif job.research_status == "verified_exact_job":
+                    status_mark = "✓"
+                else:
+                    status_mark = "?"
                 print(
                     f"    {status_mark} {_short(job.title, 92)}"
                     f" | {job.opportunity_type}"
+                    f" | availability={job.availability_status}"
                     f" | research={job.research_status}"
                     f" | jd={job.jd_status} ({len(job.jd_text)} chars)"
                 )
+                if job.research_skipped_reason:
+                    print("      skipped :", job.research_skipped_reason)
                 if job.official_job_url:
                     print("      official:", job.official_job_url)
                 elif job.application_url:
@@ -227,8 +246,12 @@ def main() -> None:
             1 for job in result.job_records if job.research_status == "verified_exact_job"
         )
         jds = sum(1 for job in result.job_records if job.jd_text.strip())
+        expired = sum(
+            1 for job in result.job_records if job.availability_status == "expired_by_source_deadline"
+        )
         print("\nEMAIL METRICS")
         print("  JobRecords    :", len(result.job_records))
+        print("  expired/skipped:", expired)
         print("  exact verified:", verified)
         print("  JD available  :", jds)
         print("  web searches  :", result.web_search_calls)
@@ -246,6 +269,7 @@ def main() -> None:
         grand_companies.update((job.company or "<unknown>") for job in result.job_records)
         grand_verified += verified
         grand_jd += jds
+        grand_expired += expired
         grand_searches += result.web_search_calls
         grand_fetches += result.page_fetch_calls
         grand_judges += result.judge_llm_calls
@@ -256,6 +280,7 @@ def main() -> None:
     print("=" * 112)
     print("JobRecords       :", grand_jobs)
     print("Companies        :", len(grand_companies))
+    print("Expired/skipped  :", grand_expired)
     print("Exact verified   :", grand_verified)
     print("JD available     :", grand_jd)
     print("Web searches     :", grand_searches)

@@ -12,6 +12,8 @@ from career_agent.models.signal import ExtractedOpportunityBatch, OpportunitySig
 CHUNK_CHARS = 6500
 CHUNK_OVERLAP = 900
 MAX_LLM_CHUNKS = 24
+MAX_RETRY_SPLIT_DEPTH = 2
+MIN_RETRY_CHARS = 1400
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,36 @@ def _chunks(text: str) -> list[str]:
             break
         start = max(start + 1, end - CHUNK_OVERLAP)
     return values
+
+
+def _split_retry_chunk(text: str) -> tuple[str, str] | None:
+    """Split a failed chunk near its midpoint, preferring a line boundary."""
+    if len(text) < MIN_RETRY_CHARS * 2:
+        return None
+
+    midpoint = len(text) // 2
+    search_radius = min(900, midpoint - 1, len(text) - midpoint - 1)
+    candidates: list[int] = []
+    for offset in range(search_radius + 1):
+        left = midpoint - offset
+        right = midpoint + offset
+        if left > 0 and text[left] == "\n":
+            candidates.append(left)
+            break
+        if right < len(text) and text[right] == "\n":
+            candidates.append(right)
+            break
+
+    split_at = candidates[0] if candidates else midpoint
+    left = text[:split_at].strip()
+    right = text[split_at:].strip()
+    if len(left) < MIN_RETRY_CHARS or len(right) < MIN_RETRY_CHARS:
+        split_at = midpoint
+        left = text[:split_at].strip()
+        right = text[split_at:].strip()
+    if not left or not right:
+        return None
+    return left, right
 
 
 def _build_llm():
@@ -79,6 +111,48 @@ SOURCE CHUNK:
     return _build_llm().invoke(prompt)
 
 
+def _invoke_with_adaptive_retry(
+    chunk: str,
+    *,
+    depth: int = 0,
+) -> tuple[list, int, list[str]]:
+    """Invoke once, recursively splitting only malformed/failed large chunks.
+
+    Dense newsletters can make a model emit too many structured objects in one
+    tool call and occasionally produce malformed JSON. Successful 6500-char calls
+    keep the normal low-cost path. Only failed chunks are bisected and retried.
+    """
+    calls = 1
+    try:
+        batch = _invoke(chunk)
+        return list(batch.opportunities), calls, []
+    except Exception as exc:
+        split = (
+            _split_retry_chunk(chunk)
+            if depth < MAX_RETRY_SPLIT_DEPTH
+            else None
+        )
+        if split is None:
+            return (
+                [],
+                calls,
+                [f"{type(exc).__name__}: {exc}"],
+            )
+
+        opportunities: list = []
+        terminal_errors: list[str] = []
+        for child in split:
+            child_items, child_calls, child_errors = _invoke_with_adaptive_retry(
+                child,
+                depth=depth + 1,
+            )
+            calls += child_calls
+            opportunities.extend(child_items)
+            terminal_errors.extend(child_errors)
+
+        return opportunities, calls, terminal_errors
+
+
 def _key(item) -> tuple[str, str]:
     company = _normalize(item.company)
     title = _normalize(item.role_title)
@@ -97,15 +171,15 @@ def extract_all_opportunities(
     errors: list[str] = []
     extracted = []
     chunks = _chunks(corpus)
+    llm_calls = 0
 
     for index, chunk in enumerate(chunks, start=1):
-        try:
-            batch = _invoke(chunk)
-            extracted.extend(batch.opportunities)
-        except Exception as exc:
+        chunk_items, chunk_calls, chunk_errors = _invoke_with_adaptive_retry(chunk)
+        llm_calls += chunk_calls
+        extracted.extend(chunk_items)
+        for error in chunk_errors:
             errors.append(
-                f"all-job extraction chunk {index}/{len(chunks)} failed: "
-                f"{type(exc).__name__}: {exc}"
+                f"all-job extraction chunk {index}/{len(chunks)} failed after adaptive retry: {error}"
             )
 
     merged: dict[tuple[str, str], OpportunitySignal] = {}
@@ -154,6 +228,6 @@ def extract_all_opportunities(
 
     return (
         list(merged.values()),
-        ExtractionMetrics(llm_calls=len(chunks), source_chars=len(corpus)),
+        ExtractionMetrics(llm_calls=llm_calls, source_chars=len(corpus)),
         errors,
     )

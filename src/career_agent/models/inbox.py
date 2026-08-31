@@ -12,19 +12,22 @@ CareerSource = Literal["goh_ze_li", "talentconnect"]
 
 
 class InboxCheckpoint(BaseModel):
-    """Local-only state used to distinguish genuinely new inbox messages."""
+    """Local-only state used to distinguish genuinely new inbox messages.
+
+    ``baseline_at`` anchors the first manual bootstrap so old messages that were
+    outside the initial scan window cannot later be mistaken for newly arrived
+    mail. ``seen_message_ids`` then provides exact de-duplication after bootstrap.
+    No email body, attachment text, or access token is stored here.
+    """
 
     schema_version: int = 1
+    baseline_at: datetime
     seen_message_ids: list[str] = Field(default_factory=list)
-    updated_at: datetime | None = None
+    updated_at: datetime
 
 
 class CareerEmailRecord(BaseModel):
-    """Relevant new career email handed to the next pipeline stage.
-
-    The rich normalized email remains available in-memory for later opportunity
-    extraction, while the checkpoint itself stores only message IDs.
-    """
+    """Relevant new career email handed to the next pipeline stage in memory."""
 
     source: CareerSource
     email: EmailMessage
@@ -36,3 +39,4 @@ class IncrementalInboxResult(BaseModel):
     filtered_out: int
     records: list[CareerEmailRecord] = Field(default_factory=list)
     unseen_message_ids: list[str] = Field(default_factory=list)
+    checkpoint_committed: bool = False

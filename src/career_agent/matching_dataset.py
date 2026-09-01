@@ -41,8 +41,6 @@ def sanitize_job_sources(job: JobRecord) -> JobRecord:
     secondary = job.secondary_source_url
 
     if is_aggregator_url(primary):
-        # Keep known useful mirrors as secondary evidence when there is no better
-        # secondary already recorded. trabajo/other weak aggregators are dropped.
         if secondary is None and primary and any(
             marker in _host(primary)
             for marker in ("linkedin.com", "indeed.", "jobstreet.", "jobsdb.")
@@ -64,8 +62,8 @@ def sanitize_job_sources(job: JobRecord) -> JobRecord:
 
 
 def is_matching_ready(job: JobRecord) -> bool:
-    """Only researched, non-expired jobs with a real fetched JD enter matching."""
-    if job.availability_status == "expired_by_source_deadline":
+    """Only active/researchable jobs with a real fetched JD enter matching."""
+    if job.availability_status in {"expired_by_source_deadline", "closed_by_official"}:
         return False
     if job.jd_status not in {"fetched_official", "fetched_secondary"}:
         return False

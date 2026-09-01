@@ -73,9 +73,10 @@ def host(url: str | None) -> str:
     if not url:
         return ""
     try:
-        return urlparse(url).netloc.lower().split(":", 1)[0]
+        value = urlparse(url).netloc.lower().split(":", 1)[0]
     except ValueError:
         return ""
+    return value[4:] if value.startswith("www.") else value
 
 
 def is_aggregator_url(url: str | None) -> bool:
@@ -119,9 +120,6 @@ def _short_alias_matches_brand_host(alias: str, compact_host: str, host_tokens: 
     if alias in host_tokens:
         return True
 
-    # Branded career domains often concatenate a short brand/acronym with a
-    # careers marker, e.g. pgcareers.com. Match against individual hostname
-    # labels so a leading "www" does not hide the brand prefix.
     career_markers = ("career", "careers", "jobs", "recruit")
     for token in host_tokens:
         if (
@@ -131,7 +129,6 @@ def _short_alias_matches_brand_host(alias: str, compact_host: str, host_tokens: 
         ):
             return True
 
-    # Also keep support for hosts without separators such as careersbcg.com.
     return (
         len(alias) >= 2
         and any(marker in compact_host for marker in career_markers)
@@ -150,7 +147,16 @@ def _company_identity_matches_url(url: str | None, company: str | None) -> bool:
     except ValueError:
         return False
 
-    raw = unquote(" ".join([parsed.netloc.lower(), parsed.path.lower(), parsed.query.lower(), parsed.fragment.lower()]))
+    raw = unquote(
+        " ".join(
+            [
+                parsed.netloc.lower(),
+                parsed.path.lower(),
+                parsed.query.lower(),
+                parsed.fragment.lower(),
+            ]
+        )
+    )
     compact = re.sub(r"[^a-z0-9]", "", raw)
     tokens = set(re.findall(r"[a-z0-9]+", raw))
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 AGGREGATOR_HOST_MARKERS = (
     "linkedin.com",
@@ -109,12 +109,13 @@ def _company_aliases(company: str | None) -> set[str]:
         "private",
         "corporation",
         "corp",
+        "solutions",
+        "branch",
     }
     tokens = [token for token in all_tokens if token not in legal_stop]
     aliases.update(token for token in tokens if len(token) >= 3)
 
-    # Keep semantic brand words such as "group" when building acronyms: THE
-    # BOSTON CONSULTING GROUP must yield BCG, while legal suffixes are excluded.
+    # Preserve common brand acronyms such as BCG and EY.
     acronym_tokens = [token for token in tokens if token not in {"and", "of", "asia"}]
     acronym = "".join(token[0] for token in acronym_tokens if token)
     if len(acronym) >= 2:
@@ -126,15 +127,56 @@ def _company_aliases(company: str | None) -> set[str]:
     return aliases
 
 
+def _company_identity_matches_url(url: str | None, company: str | None) -> bool:
+    """Require the URL itself to carry the current employer identity.
+
+    Generic ATS domains are shared by thousands of employers.  Seeing Workday,
+    Greenhouse, Lever or Mokahr is therefore not enough to call a URL official.
+    The tenant/path/query must also identify the company (e.g. keppel.wd3..., or
+    mokahr.com/.../tesla/...).
+    """
+    if not url or not company:
+        return False
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+
+    raw = unquote(
+        " ".join(
+            [
+                parsed.netloc.lower(),
+                parsed.path.lower(),
+                parsed.query.lower(),
+                parsed.fragment.lower(),
+            ]
+        )
+    )
+    compact = re.sub(r"[^a-z0-9]", "", raw)
+    tokens = set(re.findall(r"[a-z0-9]+", raw))
+
+    for alias in _company_aliases(company):
+        if len(alias) <= 3:
+            if alias in tokens:
+                return True
+        elif alias in compact:
+            return True
+    return False
+
+
 def is_plausible_official_url(url: str | None, company: str | None) -> bool:
-    """Employer/ATS source gate with legal-name, brand and acronym aliases."""
+    """Employer/ATS source gate with company-safe ATS validation."""
     value = host(url)
     if not value or is_aggregator_url(url):
         return False
     if value in {"careers.example.com", "jobs.example.com"}:
         return True
+
+    # Shared ATS domains are only official when the tenant/path/query carries the
+    # current company identity. This prevents EY records from accepting Keppel's
+    # Workday URL simply because both use Workday.
     if any(marker in value for marker in ATS_HOST_MARKERS):
-        return True
+        return _company_identity_matches_url(url, company)
 
     compact_host = re.sub(r"[^a-z0-9]", "", value)
     host_tokens = set(re.findall(r"[a-z0-9]+", value))

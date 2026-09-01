@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -16,6 +17,7 @@ class SearchResult:
 
 
 BING_URL = "https://www.bing.com/search"
+BING_RSS_URL = "https://www.bing.com/search?format=rss"
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 DUCKDUCKGO_LITE_URL = "https://lite.duckduckgo.com/lite/"
 SEARCH_TIMEOUT_SECONDS = 6.0
@@ -35,25 +37,12 @@ def _simplify_query(query: str) -> str:
     return value.strip()
 
 
-def _append_result(
-    results: list[SearchResult],
-    seen: set[str],
-    *,
-    title: str,
-    href: str,
-    snippet: str = "",
-) -> None:
+def _append_result(results: list[SearchResult], seen: set[str], *, title: str, href: str, snippet: str = "") -> None:
     url = _unwrap_duckduckgo_url(href.strip())
     if not url.startswith(("http://", "https://")) or url in seen:
         return
     seen.add(url)
-    results.append(
-        SearchResult(
-            title=" ".join(title.split()),
-            url=url,
-            snippet=" ".join(snippet.split()),
-        )
-    )
+    results.append(SearchResult(title=" ".join(title.split()), url=url, snippet=" ".join(snippet.split())))
 
 
 def _parse_bing_results(html: str, max_results: int) -> list[SearchResult]:
@@ -70,8 +59,25 @@ def _parse_bing_results(html: str, max_results: int) -> list[SearchResult]:
             seen,
             title=anchor.get_text(" ", strip=True),
             href=anchor.get("href", ""),
-            snippet=(snippet_node.get_text(" ", strip=True) if snippet_node else ""),
+            snippet=snippet_node.get_text(" ", strip=True) if snippet_node else "",
         )
+        if len(results) >= max_results:
+            break
+    return results
+
+
+def _parse_bing_rss(xml_text: str, max_results: int) -> list[SearchResult]:
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+    for item in root.findall(".//item"):
+        title = item.findtext("title") or ""
+        link = item.findtext("link") or ""
+        description = item.findtext("description") or ""
+        _append_result(results, seen, title=title, href=link, snippet=description)
         if len(results) >= max_results:
             break
     return results
@@ -91,7 +97,7 @@ def _parse_html_results(html: str, max_results: int) -> list[SearchResult]:
             seen,
             title=anchor.get_text(" ", strip=True),
             href=anchor.get("href", ""),
-            snippet=(snippet_node.get_text(" ", strip=True) if snippet_node else ""),
+            snippet=snippet_node.get_text(" ", strip=True) if snippet_node else "",
         )
         if len(results) >= max_results:
             break
@@ -105,13 +111,9 @@ def _parse_lite_results(html: str, max_results: int) -> list[SearchResult]:
     anchors = soup.select("a.result-link")
     if not anchors:
         anchors = [
-            anchor
-            for anchor in soup.find_all("a", href=True)
+            anchor for anchor in soup.find_all("a", href=True)
             if anchor.get_text(" ", strip=True)
-            and (
-                anchor.get("href", "").startswith(("http://", "https://"))
-                or "uddg=" in anchor.get("href", "")
-            )
+            and (anchor.get("href", "").startswith(("http://", "https://")) or "uddg=" in anchor.get("href", ""))
         ]
     for anchor in anchors:
         snippet = ""
@@ -120,26 +122,13 @@ def _parse_lite_results(html: str, max_results: int) -> list[SearchResult]:
             snippet_node = parent.find_next(class_="result-snippet")
             if snippet_node:
                 snippet = snippet_node.get_text(" ", strip=True)
-        _append_result(
-            results,
-            seen,
-            title=anchor.get_text(" ", strip=True),
-            href=anchor.get("href", ""),
-            snippet=snippet,
-        )
+        _append_result(results, seen, title=anchor.get_text(" ", strip=True), href=anchor.get("href", ""), snippet=snippet)
         if len(results) >= max_results:
             break
     return results
 
 
-def _request_search(
-    url: str,
-    query: str,
-    *,
-    parser,
-    max_results: int,
-    headers: dict[str, str],
-) -> list[SearchResult]:
+def _request_search(url: str, query: str, *, parser, max_results: int, headers: dict[str, str]) -> list[SearchResult]:
     response = httpx.get(
         url,
         params={"q": query},
@@ -152,11 +141,10 @@ def _request_search(
 
 
 def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
-    """Best-effort public search with provider isolation.
+    """Best-effort public search with provider/parser isolation.
 
-    Search order is Bing -> DuckDuckGo HTML -> DuckDuckGo Lite. A 403/429 from
-    one provider is local to that provider/query; it never disables subsequent
-    jobs or later LinkedIn fallback searches in the same catalog run.
+    Order: Bing HTML -> Bing RSS -> DuckDuckGo HTML -> DuckDuckGo Lite.
+    Empty/blocked HTML never poisons later jobs or later providers.
     """
     if not query.strip():
         return []
@@ -164,8 +152,7 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0 Safari/537.36"
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
         ),
         "Accept-Language": "en-SG,en;q=0.9",
     }
@@ -176,29 +163,17 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
 
     providers = (
         (BING_URL, _parse_bing_results),
+        (BING_RSS_URL, _parse_bing_rss),
         (DUCKDUCKGO_HTML_URL, _parse_html_results),
         (DUCKDUCKGO_LITE_URL, _parse_lite_results),
     )
-    errors: list[Exception] = []
 
     for url, parser in providers:
         for variant in variants:
             try:
-                results = _request_search(
-                    url,
-                    variant,
-                    parser=parser,
-                    max_results=max_results,
-                    headers=headers,
-                )
+                results = _request_search(url, variant, parser=parser, max_results=max_results, headers=headers)
                 if results:
                     return results
-            except Exception as exc:
-                # Provider blocks and transient errors are isolated here. Continue
-                # to the next provider rather than poisoning the whole research run.
-                errors.append(exc)
+            except Exception:
                 break
-
-    # A complete provider failure is equivalent to no results for this query.
-    # Callers can continue to research later companies/roles and alternate sources.
     return []

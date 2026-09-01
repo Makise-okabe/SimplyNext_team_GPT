@@ -33,7 +33,6 @@ def _unwrap_duckduckgo_url(href: str) -> str:
 
 
 def _decode_bing_target(value: str) -> str | None:
-    """Decode Bing's ``u=a1<base64-url>`` redirect target when present."""
     target = unquote(value or "").strip()
     if target.startswith(("http://", "https://")):
         return target
@@ -84,6 +83,19 @@ def _site_constraint(query: str) -> tuple[str, str] | None:
     if not target_host:
         return None
     return target_host, target_path
+
+
+def _relax_site_query(query: str) -> str:
+    """Replace ``site:host/path`` with a normal host/path keyword.
+
+    Some public search frontends ignore or badly implement site: queries. The
+    results are still filtered back to the requested site before being returned.
+    """
+    match = SITE_PATTERN.search(query or "")
+    if not match:
+        return query
+    target = match.group(1).strip().rstrip("/")
+    return re.sub(SITE_PATTERN, f" {target}", query, count=1).strip()
 
 
 def _result_matches_site(result: SearchResult, constraint: tuple[str, str] | None) -> bool:
@@ -254,8 +266,29 @@ def _request_search(
     return parser(response.text, max_results)
 
 
+def _search_variants(query: str, constraint: tuple[str, str] | None) -> list[str]:
+    variants: list[str] = [query.strip()]
+    simplified = _simplify_query(query)
+    if simplified and simplified not in variants:
+        variants.append(simplified)
+
+    if constraint is not None:
+        relaxed = _relax_site_query(query)
+        if relaxed and relaxed not in variants:
+            variants.append(relaxed)
+        relaxed_simple = _simplify_query(relaxed)
+        if relaxed_simple and relaxed_simple not in variants:
+            variants.append(relaxed_simple)
+    return variants
+
+
 def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
-    """Best-effort public search with provider/parser and site-filter isolation."""
+    """Best-effort public search with site-safe relaxed fallback.
+
+    A provider result only succeeds when it survives the requested site filter.
+    If strict ``site:`` syntax yields nothing, the same provider stack retries a
+    relaxed query while still enforcing that exact host/path on returned URLs.
+    """
     if not query.strip():
         return []
 
@@ -266,12 +299,8 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
         ),
         "Accept-Language": "en-SG,en;q=0.9",
     }
-    variants = [query.strip()]
-    simplified = _simplify_query(query)
-    if simplified and simplified != variants[0]:
-        variants.append(simplified)
-
     constraint = _site_constraint(query)
+    variants = _search_variants(query, constraint)
     providers = (
         (BING_URL, _parse_bing_results),
         (BING_RSS_URL, _parse_bing_rss),
@@ -279,8 +308,8 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
         (DUCKDUCKGO_LITE_URL, _parse_lite_results),
     )
 
-    for url, parser in providers:
-        for variant in variants:
+    for variant in variants:
+        for url, parser in providers:
             try:
                 raw_results = _request_search(
                     url,
@@ -293,5 +322,5 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
                 if results:
                     return results
             except Exception:
-                break
+                continue
     return []

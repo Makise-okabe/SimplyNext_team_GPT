@@ -35,7 +35,6 @@ def test_unwrap_bing_base64_redirect_url() -> None:
     target = "https://www.linkedin.com/jobs/view/1234567890"
     encoded = base64.urlsafe_b64encode(target.encode()).decode().rstrip("=")
     wrapped = f"https://www.bing.com/ck/a?foo=1&u={quote('a1' + encoded)}&ntb=1"
-
     assert _unwrap_bing_url(wrapped) == target
 
 
@@ -51,9 +50,7 @@ def test_parse_bing_result_exposes_real_target_not_click_tracker() -> None:
       </li>
     </body></html>
     """
-
     results = _parse_bing_results(html, max_results=5)
-
     assert len(results) == 1
     assert results[0].url == target
     assert "bing.com/ck/" not in results[0].url
@@ -75,9 +72,7 @@ def test_parse_duckduckgo_lite_result() -> None:
       <div class="result-snippet">Official careers posting</div>
     </body></html>
     """
-
     results = _parse_lite_results(html, max_results=5)
-
     assert len(results) == 1
     assert results[0].title == "Associate, Singapore (2027)"
     assert results[0].url == "https://careers.example.com/jobs/58603"
@@ -97,9 +92,7 @@ def test_site_constraint_filters_wrong_domain_results() -> None:
             snippet="Tesla Singapore",
         ),
     ]
-
     filtered = _apply_site_constraint(results, constraint, max_results=10)
-
     assert [result.url for result in filtered] == [
         "https://www.linkedin.com/jobs/view/123456"
     ]
@@ -107,6 +100,7 @@ def test_site_constraint_filters_wrong_domain_results() -> None:
 
 def test_site_scoped_search_falls_through_until_provider_returns_matching_domain(monkeypatch) -> None:
     calls: list[str] = []
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
     def fake_request(url, query, *, parser, max_results, headers):
         calls.append(url)
@@ -133,7 +127,6 @@ def test_site_scoped_search_falls_through_until_provider_returns_matching_domain
         'site:linkedin.com/jobs "Tesla" "Security Intelligence Operations Specialist" Singapore',
         max_results=10,
     )
-
     assert len(results) == 1
     assert results[0].url == "https://www.linkedin.com/jobs/view/123456"
     assert web_search.BING_URL in calls
@@ -142,6 +135,7 @@ def test_site_scoped_search_falls_through_until_provider_returns_matching_domain
 
 def test_site_search_retries_relaxed_query_but_keeps_site_filter(monkeypatch) -> None:
     queries: list[str] = []
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
     def fake_request(url, query, *, parser, max_results, headers):
         queries.append(query)
@@ -167,12 +161,43 @@ def test_site_search_retries_relaxed_query_but_keeps_site_filter(monkeypatch) ->
         'site:reolink.com "Backend Engineer" Singapore',
         max_results=10,
     )
-
     assert [item.url for item in results] == [
         "https://www.reolink.com/careers/backend-engineer"
     ]
     assert any("site:reolink.com" in query.lower() for query in queries)
     assert any("reolink.com" in query.lower() and "site:reolink.com" not in query.lower() for query in queries)
+
+
+def test_optional_tavily_provider_is_preferred_and_site_filtered(monkeypatch) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    monkeypatch.setattr(
+        web_search,
+        "_search_tavily",
+        lambda query, max_results: [
+            SearchResult(
+                title="Tesla official",
+                url="https://www.tesla.com/careers/search/job/123",
+                snippet="Security Intelligence Operations Specialist",
+            ),
+            SearchResult(
+                title="Security Intelligence Operations Specialist - Tesla",
+                url="https://www.linkedin.com/jobs/view/987654",
+                snippet="Tesla Singapore",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        web_search,
+        "_request_search",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fallback should not run")),
+    )
+    results = web_search.search_public_web(
+        'site:linkedin.com/jobs "Tesla" "Security Intelligence Operations Specialist" Singapore',
+        max_results=10,
+    )
+    assert [item.url for item in results] == [
+        "https://www.linkedin.com/jobs/view/987654"
+    ]
 
 
 def test_host_canonicalizes_www_prefix() -> None:

@@ -101,38 +101,49 @@ def _structured_signals(
             continue
         section = ""
         in_table = False
+        last_company: str | None = None
         for raw_line in document.splitlines():
             line = raw_line.strip()
             upper = re.sub(r"[^A-Z]", "", line.upper())
             if upper == "JOBS":
                 section = SECTION_JOBS
+                last_company = None
                 continue
             if upper == "INTERNSHIPS":
                 section = SECTION_INTERNSHIPS
+                last_company = None
                 continue
             if upper == "EVENTS":
                 section = SECTION_EVENTS
+                last_company = None
                 continue
             if line == TABLE_START:
                 in_table = True
+                last_company = None
                 continue
             if line == TABLE_END:
                 in_table = False
+                last_company = None
                 continue
             if not in_table or section not in {SECTION_JOBS, SECTION_INTERNSHIPS}:
                 continue
 
             cells = [_clean(cell) for cell in raw_line.split("|")]
-            if len(cells) < 4:
-                continue
             joined = " | ".join(cells).lower()
             if "company" in joined and ("role" in joined or "tc id" in joined):
                 continue
 
             if len(cells) >= 5:
                 company, role_cell, remarks = cells[1], cells[2], " | ".join(cells[4:])
-            else:
+                last_company = _clean(company) or last_company
+            elif len(cells) == 4:
                 company, role_cell, remarks = cells[0], cells[1], " | ".join(cells[3:])
+                last_company = _clean(company) or last_company
+            elif len(cells) == 3 and last_company:
+                company, role_cell, remarks = last_company, cells[0], cells[2]
+            else:
+                continue
+
             company = _clean(company)
             if not company or not role_cell:
                 continue
@@ -199,7 +210,15 @@ def _has_meaningful_non_table_content(corpus: str) -> bool:
         if line == SOURCE_DOCUMENT_SEPARATOR:
             continue
         lines.append(line)
-    return len(" ".join(lines)) >= 80
+    residue = " ".join(lines)
+    if not residue:
+        return False
+    return bool(
+        re.search(
+            r"(?i)\b(job|jobs|role|roles|intern|internship|hiring|graduate|associate|engineer|analyst|developer|manager|programme|program)\b",
+            residue,
+        )
+    )
 
 
 def _key(signal: OpportunitySignal) -> tuple[str, str]:
@@ -237,6 +256,7 @@ def extract_goh_opportunities(
             source_message_id=source_message_id,
             source_name=source_name,
             source_date=source_date,
+            current_corpus=corpus,
         )
 
     should_run_base = not base and (not robust or _has_meaningful_non_table_content(llm_corpus))

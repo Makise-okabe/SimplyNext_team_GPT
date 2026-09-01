@@ -18,6 +18,7 @@ JDStatus = Literal[
 AvailabilityStatus = Literal[
     "active_candidate",
     "expired_by_source_deadline",
+    "closed_by_official",
     "unknown",
 ]
 
@@ -32,6 +33,9 @@ class SourceDocument(BaseModel):
 class JobRecord(BaseModel):
     """Research-complete job contract consumed by the matching agent."""
 
+    # Canonical source tag lets the later matching/ranking agent keep provenance
+    # without reopening the original Outlook message.
+    source_key: Literal["goh_ze_li", "talentconnect", "unknown"] = "unknown"
     source_message_id: str
     source_sender_email: str | None = None
     source_subject: str
@@ -52,10 +56,9 @@ class JobRecord(BaseModel):
     research_confidence: Literal["high", "medium", "low"] = "low"
     research_basis: str = "none"
 
-    # Matching-friendly source hierarchy. ``primary_source_url`` should point to
-    # the employer/ATS source whenever we can find one. ``secondary_source_url``
-    # is a useful public mirror such as LinkedIn when the official page is absent,
-    # dynamic, or no longer readable.
+    # Source hierarchy for downstream matching/explanations. The primary source
+    # is always employer/ATS when known. A secondary mirror may supply the JD when
+    # an official page is dynamic or otherwise unreadable.
     primary_source_url: str | None = None
     secondary_source_url: str | None = None
     official_job_url: str | None = None

@@ -96,13 +96,13 @@ def _company_aliases(company: str | None) -> set[str]:
         if len(compact) >= 2:
             aliases.add(compact)
 
-    stop = {
+    all_tokens = re.findall(r"[a-z0-9]+", raw.lower())
+    legal_stop = {
         "the",
         "pte",
         "ltd",
         "limited",
         "inc",
-        "group",
         "holdings",
         "singapore",
         "company",
@@ -110,19 +110,17 @@ def _company_aliases(company: str | None) -> set[str]:
         "corporation",
         "corp",
     }
-    tokens = [
-        token
-        for token in re.findall(r"[a-z0-9]+", raw.lower())
-        if token not in stop
-    ]
+    tokens = [token for token in all_tokens if token not in legal_stop]
     aliases.update(token for token in tokens if len(token) >= 3)
 
+    # Keep semantic brand words such as "group" when building acronyms: THE
+    # BOSTON CONSULTING GROUP must yield BCG, while legal suffixes are excluded.
     acronym_tokens = [token for token in tokens if token not in {"and", "of", "asia"}]
     acronym = "".join(token[0] for token in acronym_tokens if token)
     if len(acronym) >= 2:
         aliases.add(acronym)
 
-    compact = "".join(tokens)
+    compact = "".join(token for token in tokens if token != "group")
     if len(compact) >= 4:
         aliases.add(compact)
     return aliases

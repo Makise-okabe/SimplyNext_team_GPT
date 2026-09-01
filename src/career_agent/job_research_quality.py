@@ -18,13 +18,16 @@ AGGREGATOR_HOST_MARKERS = (
 ATS_HOST_MARKERS = (
     "myworkdayjobs.com",
     "workdayjobs.com",
+    "workday.com",
     "greenhouse.io",
     "lever.co",
     "smartrecruiters.com",
     "successfactors.com",
     "taleo.net",
+    "oraclecloud.com",
     "icims.com",
     "jobvite.com",
+    "eightfold.ai",
     "mokahr.com",
 )
 
@@ -84,17 +87,49 @@ def is_secondary_url(url: str | None) -> bool:
     return is_aggregator_url(url)
 
 
-def _company_tokens(company: str | None) -> list[str]:
-    stop = {"pte", "ltd", "limited", "inc", "group", "holdings", "singapore", "company"}
-    return [
+def _company_aliases(company: str | None) -> set[str]:
+    raw = company or ""
+    aliases: set[str] = set()
+
+    for parenthetical in re.findall(r"\(([^)]{2,20})\)", raw):
+        compact = re.sub(r"[^a-z0-9]", "", parenthetical.lower())
+        if len(compact) >= 2:
+            aliases.add(compact)
+
+    stop = {
+        "the",
+        "pte",
+        "ltd",
+        "limited",
+        "inc",
+        "group",
+        "holdings",
+        "singapore",
+        "company",
+        "private",
+        "corporation",
+        "corp",
+    }
+    tokens = [
         token
-        for token in re.findall(r"[a-z0-9]+", (company or "").lower())
-        if len(token) >= 4 and token not in stop
+        for token in re.findall(r"[a-z0-9]+", raw.lower())
+        if token not in stop
     ]
+    aliases.update(token for token in tokens if len(token) >= 3)
+
+    acronym_tokens = [token for token in tokens if token not in {"and", "of", "asia"}]
+    acronym = "".join(token[0] for token in acronym_tokens if token)
+    if len(acronym) >= 2:
+        aliases.add(acronym)
+
+    compact = "".join(tokens)
+    if len(compact) >= 4:
+        aliases.add(compact)
+    return aliases
 
 
 def is_plausible_official_url(url: str | None, company: str | None) -> bool:
-    """Conservative primary-source gate: employer domain or known ATS, never aggregator."""
+    """Employer/ATS source gate with legal-name, brand and acronym aliases."""
     value = host(url)
     if not value or is_aggregator_url(url):
         return False
@@ -102,8 +137,16 @@ def is_plausible_official_url(url: str | None, company: str | None) -> bool:
         return True
     if any(marker in value for marker in ATS_HOST_MARKERS):
         return True
-    compact_host = value.replace("-", "").replace(".", "")
-    return any(token.replace("-", "") in compact_host for token in _company_tokens(company))
+
+    compact_host = re.sub(r"[^a-z0-9]", "", value)
+    host_tokens = set(re.findall(r"[a-z0-9]+", value))
+    for alias in _company_aliases(company):
+        if len(alias) <= 3:
+            if alias in host_tokens:
+                return True
+        elif alias in compact_host:
+            return True
+    return False
 
 
 def page_is_closed(text: str) -> bool:

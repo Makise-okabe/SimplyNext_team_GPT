@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -36,6 +37,33 @@ def _matches_company(company: str | None, filters: list[str]) -> bool:
         alias == canonical or alias in canonical or canonical in alias
         for alias in aliases
     )
+
+
+def _corpus_aliases(company: str) -> list[str]:
+    canonical = _canonical_company_text(company)
+    if canonical == "procter gamble":
+        return ["p&g", "p and g", "procter & gamble", "procter and gamble", "pgcareers"]
+    if canonical == "point72":
+        return ["point72"]
+    return [token for token in re.findall(r"[a-z0-9]+", company.lower()) if len(token) >= 3]
+
+
+def _corpus_hits(corpus: str, company: str, limit: int = 12) -> list[str]:
+    aliases = _corpus_aliases(company)
+    hits: list[str] = []
+    for raw_line in corpus.splitlines():
+        line = " ".join(raw_line.split()).strip()
+        lowered = line.lower()
+        if line and any(alias in lowered for alias in aliases):
+            hits.append(line)
+            if len(hits) >= limit:
+                break
+    return hits
+
+
+def _short(value: str | None, limit: int = 180) -> str:
+    text = " ".join((value or "").split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def main() -> None:
@@ -96,6 +124,10 @@ def main() -> None:
     print("Companies matched  :", len(groups))
     print("Roles matched      :", len(selected))
     print("Extraction LLM     :", metrics.llm_calls)
+    print("Source subject     :", _short(goh.subject, 200))
+    print("Source received    :", getattr(goh, "received_at", None))
+    print("Source message id  :", _short(goh.message_id, 120))
+    print("Corpus chars       :", len(corpus))
     print("\nExpected behavior: source link first → official exact role → LinkedIn fallback")
 
     missing = [
@@ -105,6 +137,14 @@ def main() -> None:
     ]
     if missing:
         print("Companies absent after production normalization:", ", ".join(missing))
+        print("\nMISSING COMPANY SOURCE EVIDENCE")
+        for requested in missing:
+            hits = _corpus_hits(corpus, requested)
+            print(f"  {requested}: corpus_hits={len(hits)}")
+            for line in hits:
+                print("    ", _short(line, 240))
+            if not hits:
+                print("     <no matching company alias found in current corpus>")
 
     context = ResearchContext()
     all_jobs = []
@@ -139,12 +179,38 @@ def main() -> None:
             if job.warnings:
                 print("    warnings       :", " | ".join(job.warnings[:3]))
 
+    print("\n" + "=" * 104)
+    print("SEARCH TRACE — ACTUAL RETURNED RESULTS")
+    print("=" * 104)
+    for query, results in context.search_cache.items():
+        print("QUERY:", _short(query, 240))
+        print("  usable results:", len(results))
+        if not results:
+            print("   <none>")
+            continue
+        for index, result in enumerate(results[:3], start=1):
+            print(f"  {index}. {_short(result.title, 160)}")
+            print("     ", result.url)
+
     payload = {
-        "schema": "simplinext.track_b.live_check.v1",
+        "schema": "simplinext.track_b.live_check.v2",
         "companies_requested": companies,
+        "source_subject": goh.subject,
+        "source_received_at": str(getattr(goh, "received_at", None)),
+        "source_message_id": goh.message_id,
+        "missing_company_corpus_hits": {
+            company: _corpus_hits(corpus, company) for company in missing
+        },
         "roles": len(all_jobs),
         "web_search_calls": context.search_calls,
         "page_fetch_calls": context.fetch_calls,
+        "search_trace": {
+            query: [
+                {"title": item.title, "url": item.url, "snippet": item.snippet}
+                for item in results[:5]
+            ]
+            for query, results in context.search_cache.items()
+        },
         "source_warnings": source_warnings,
         "extraction_errors": extraction_errors,
         "jobs": [job.model_dump(mode="json") for job in all_jobs],

@@ -41,7 +41,7 @@ Information Communication Technology | AvePoint Singapore | Backend Developer | 
     assert point72 in point.urls
     assert point.deadline_hint is None
 
-    avepoint = next(item for item in opportunities if item.title == "Backend Developer")
+    avepoint = next(item for item in opportunities if item.role_title == "Backend Developer")
     assert avepoint.deadline_hint.isoformat() == "2026-08-31"
     assert errors == []
     assert metrics.llm_calls == 0

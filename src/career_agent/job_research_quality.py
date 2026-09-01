@@ -118,12 +118,27 @@ def _company_aliases(company: str | None) -> set[str]:
 def _short_alias_matches_brand_host(alias: str, compact_host: str, host_tokens: set[str]) -> bool:
     if alias in host_tokens:
         return True
-    # Safe special case for branded career domains such as pgcareers.com. Do not
-    # apply this to shared ATS domains (handled separately below).
+
+    # Branded career domains often concatenate a short brand/acronym with a
+    # careers marker, e.g. pgcareers.com. Match against individual hostname
+    # labels so a leading "www" does not hide the brand prefix.
+    career_markers = ("career", "careers", "jobs", "recruit")
+    for token in host_tokens:
+        if (
+            len(alias) >= 2
+            and token.startswith(alias)
+            and any(marker in token for marker in career_markers)
+        ):
+            return True
+
+    # Also keep support for hosts without separators such as careersbcg.com.
     return (
         len(alias) >= 2
-        and compact_host.startswith(alias)
-        and any(marker in compact_host for marker in ("career", "careers", "jobs", "recruit"))
+        and any(marker in compact_host for marker in career_markers)
+        and (
+            compact_host.startswith(alias)
+            or any(f"{alias}{marker}" in compact_host for marker in career_markers)
+        )
     )
 
 

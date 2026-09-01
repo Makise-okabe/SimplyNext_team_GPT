@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from career_agent import job_catalog_pipeline
 from career_agent.all_job_extraction import ExtractionMetrics
 from career_agent.goh_extraction import extract_goh_opportunities
-from career_agent.job_catalog_pipeline import _company_key, _is_generic_talentconnect_seed
+from career_agent.job_catalog_pipeline import (
+    _company_key,
+    _is_generic_talentconnect_seed,
+    _sanitize_signal_source_urls,
+)
 from career_agent.job_research_quality import is_plausible_official_url
 from career_agent.models.signal import OpportunitySignal
 from career_agent.tools import web_search
@@ -64,6 +67,20 @@ ICT | Reolink | AI Engineer | 6a123456789012001d123456 | Deadline: 3 Nov 2026
 
     match = next(item for item in signals if item.company == "Reolink" and item.role_title == "AI Engineer")
     assert match.urls == []
+
+
+def test_pipeline_drops_cross_company_concrete_source_url() -> None:
+    wrong = "https://employmenthero.com/sg/jobs/position/transcelestial-technologies-software-engineer-space/"
+    cleaned = _sanitize_signal_source_urls(_signal("Reolink", "AI Engineer", [wrong]))
+    assert cleaned.urls == []
+
+
+def test_pipeline_keeps_company_matched_official_source_url() -> None:
+    point72 = "https://careers.point72.com/CSJobDetail?jobCode=CPA-0014976"
+    cleaned = _sanitize_signal_source_urls(
+        _signal("Point72 Asia (Singapore Pte Ltd)", "Investment Analyst", [point72])
+    )
+    assert cleaned.urls == [point72]
 
 
 def test_company_key_collapses_obvious_brand_and_legal_name_duplicates() -> None:

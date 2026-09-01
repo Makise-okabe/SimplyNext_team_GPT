@@ -136,8 +136,6 @@ def _structured_signals(
             if not company or not role_cell:
                 continue
 
-            # Structured Goh rows are authoritative for source URLs. Only URLs
-            # physically present in this exact row may be attached to its roles.
             row_urls = list(dict.fromkeys(extract_links_from_text(" | ".join(cells))))
             for role in _split_numbered_roles(role_cell):
                 if not role or role.lower().startswith("role"):
@@ -162,12 +160,6 @@ def _structured_signals(
 
 
 def _strip_structured_email_tables(corpus: str) -> str:
-    """Remove Goh HTML-table bodies before optional LLM extraction.
-
-    The deterministic parser owns these rows. Passing the same rows to the LLM
-    creates duplicates, cross-row URL guesses, extra cost and a hard dependency
-    on Groq before the reliable parser can run.
-    """
     documents: list[str] = []
     for document in corpus.split(SOURCE_DOCUMENT_SEPARATOR):
         if not document.strip().startswith("SOURCE: EMAIL\n"):
@@ -194,7 +186,6 @@ def _strip_structured_email_tables(corpus: str) -> str:
 
 
 def _has_meaningful_non_table_content(corpus: str) -> bool:
-    """Avoid an LLM call for corpus residue that is only source labels/headings."""
     lines: list[str] = []
     ignored = {"jobs", "internships", "events"}
     for raw_line in corpus.splitlines():
@@ -238,7 +229,11 @@ def extract_goh_opportunities(
     errors: list[str] = []
     metrics = ExtractionMetrics(llm_calls=0, source_chars=len(llm_corpus))
 
-    if _has_meaningful_non_table_content(llm_corpus):
+    # When there is no deterministic table evidence at all, preserve the old
+    # natural-language extraction path even for very short messages. The residue
+    # threshold is only an optimization for emails already covered by tables.
+    should_run_base = not robust or _has_meaningful_non_table_content(llm_corpus)
+    if should_run_base:
         try:
             base, metrics, errors = base_extractor(
                 source_name=source_name,
@@ -247,8 +242,6 @@ def extract_goh_opportunities(
                 corpus=llm_corpus,
             )
         except Exception as exc:
-            # Structured rows remain usable even when optional LLM enrichment is
-            # unavailable. Never fail the whole Track B pipeline on Groq here.
             base = []
             metrics = ExtractionMetrics(llm_calls=0, source_chars=len(llm_corpus))
             errors = [f"optional Goh non-table extraction failed: {type(exc).__name__}: {exc}"]

@@ -105,6 +105,7 @@ def test_same_company_roles_share_company_discovery_and_batch_official_search(mo
         _signal("Ley Choon", "EHS Officer"),
     ]
     queries: list[str] = []
+    fetched_urls: list[str] = []
 
     def fake_search(query: str, max_results: int = 10):
         queries.append(query)
@@ -128,15 +129,8 @@ def test_same_company_roles_share_company_discovery_and_batch_official_search(mo
         return []
 
     def fake_fetch(url: str, timeout_seconds: float = 8.0):
+        fetched_urls.append(url)
         tail = url.rsplit("/", 1)[-1]
-        if tail == "jobs":
-            return FetchedPage(
-                requested_url=url,
-                final_url=url,
-                status_code=200,
-                title="Ley Choon Careers",
-                text="Ley Choon careers homepage",
-            )
         index = int(tail) - 1
         signal = signals[index]
         return FetchedPage(
@@ -163,8 +157,15 @@ def test_same_company_roles_share_company_discovery_and_batch_official_search(mo
     assert sum(1 for query in queries if " OR " in query) == 1
     assert not any("linkedin.com/jobs" in query.lower() for query in queries)
     assert outcome.search_calls == 2
-    # One cached careers-homepage probe + one exact page per role.
-    assert outcome.fetch_calls == 4
+    # The careers landing page discovers the host only. It is never fetched or
+    # mislabeled as a role's primary source; only the three exact job pages fetch.
+    assert outcome.fetch_calls == 3
+    assert "https://careers.leychoon.com/jobs" not in fetched_urls
+    assert set(fetched_urls) == {
+        "https://careers.leychoon.com/job/1",
+        "https://careers.leychoon.com/job/2",
+        "https://careers.leychoon.com/job/3",
+    }
 
 
 def test_linkedin_runs_only_after_official_phase_does_not_produce_jd(monkeypatch) -> None:

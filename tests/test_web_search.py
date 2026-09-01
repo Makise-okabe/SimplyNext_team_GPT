@@ -1,10 +1,15 @@
 import base64
 from urllib.parse import quote
 
+from career_agent.job_research_quality import host
+from career_agent.tools import web_search
 from career_agent.tools.web_search import (
+    SearchResult,
+    _apply_site_constraint,
     _parse_bing_results,
     _parse_lite_results,
     _simplify_query,
+    _site_constraint,
     _unwrap_bing_url,
     _unwrap_duckduckgo_url,
 )
@@ -76,3 +81,66 @@ def test_parse_duckduckgo_lite_result() -> None:
     assert len(results) == 1
     assert results[0].title == "Associate, Singapore (2027)"
     assert results[0].url == "https://careers.example.com/jobs/58603"
+
+
+def test_site_constraint_filters_wrong_domain_results() -> None:
+    constraint = _site_constraint('site:linkedin.com/jobs "Tesla" "Security Intelligence"')
+    results = [
+        SearchResult(
+            title="Tesla careers",
+            url="https://www.tesla.com/careers/search/job/123",
+            snippet="Security Intelligence",
+        ),
+        SearchResult(
+            title="Security Intelligence Operations Specialist - Tesla",
+            url="https://www.linkedin.com/jobs/view/123456",
+            snippet="Tesla Singapore",
+        ),
+    ]
+
+    filtered = _apply_site_constraint(results, constraint, max_results=10)
+
+    assert [result.url for result in filtered] == [
+        "https://www.linkedin.com/jobs/view/123456"
+    ]
+
+
+def test_site_scoped_search_falls_through_until_provider_returns_matching_domain(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_request(url, query, *, parser, max_results, headers):
+        calls.append(url)
+        if url == web_search.BING_URL:
+            return [
+                SearchResult(
+                    title="Tesla careers",
+                    url="https://www.tesla.com/careers/search/job/123",
+                    snippet="Security Intelligence Operations Specialist",
+                )
+            ]
+        if url == web_search.BING_RSS_URL:
+            return [
+                SearchResult(
+                    title="Security Intelligence Operations Specialist - Tesla",
+                    url="https://www.linkedin.com/jobs/view/123456",
+                    snippet="Tesla Singapore",
+                )
+            ]
+        return []
+
+    monkeypatch.setattr(web_search, "_request_search", fake_request)
+    results = web_search.search_public_web(
+        'site:linkedin.com/jobs "Tesla" "Security Intelligence Operations Specialist" Singapore',
+        max_results=10,
+    )
+
+    assert len(results) == 1
+    assert results[0].url == "https://www.linkedin.com/jobs/view/123456"
+    assert web_search.BING_URL in calls
+    assert web_search.BING_RSS_URL in calls
+
+
+def test_host_canonicalizes_www_prefix() -> None:
+    assert host("https://www.reolink.com/careers") == "reolink.com"
+    assert host("https://reolink.com/careers") == "reolink.com"
+    assert host("https://www.linkedin.com/jobs/view/123") == "linkedin.com"

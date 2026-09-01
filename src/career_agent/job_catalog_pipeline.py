@@ -10,6 +10,11 @@ from career_agent.all_job_extraction import extract_all_opportunities
 from career_agent.batch_sources import build_source_corpus
 from career_agent.company_job_research import ResearchContext, research_company_jobs
 from career_agent.goh_extraction import extract_goh_opportunities
+from career_agent.job_normalization import (
+    canonical_company_text,
+    dedupe_signals,
+    expand_known_multi_role_signal,
+)
 from career_agent.job_research_quality import is_plausible_official_url, is_secondary_url
 from career_agent.models.email import EmailMessage
 from career_agent.models.inbox import CareerEmailRecord
@@ -19,29 +24,6 @@ from career_agent.talentconnect_extraction import extract_talentconnect_opportun
 
 ProgressCallback = Callable[[str], None]
 
-COMPANY_CANONICAL_ALIASES = {
-    "pg": "procter gamble",
-    "procter gamble": "procter gamble",
-    "procterandgamble": "procter gamble",
-    "watsons": "watsons",
-    "deutschebank": "deutsche bank",
-    "ey": "ernst young",
-    "ernstyoung": "ernst young",
-    "ernstyoungsingaporeey": "ernst young",
-    "ernstyoungsolutions": "ernst young",
-}
-LEGAL_SUFFIXES = {
-    "pte",
-    "ltd",
-    "limited",
-    "private",
-    "inc",
-    "corp",
-    "corporation",
-    "plc",
-    "llp",
-    "ag",
-}
 GENERIC_TALENTCONNECT_TITLES = {
     "career opportunities",
     "hiring opportunities",
@@ -61,18 +43,12 @@ DIRECT_JOB_URL_MARKERS = (
 
 
 def _canonical_company_text(company: str | None) -> str:
-    raw = (company or "unknown").lower().replace("&", " and ")
-    raw = re.sub(r"[^a-z0-9]+", " ", raw)
-    tokens = [token for token in raw.split() if token not in LEGAL_SUFFIXES]
-    value = " ".join(tokens).strip()
-    compact = "".join(token for token in tokens if token != "and")
-    if compact in COMPANY_CANONICAL_ALIASES:
-        return COMPANY_CANONICAL_ALIASES[compact]
-    return value.replace(" and ", " ").strip()
+    """Backward-compatible wrapper used by diagnostics/tests."""
+    return canonical_company_text(company)
 
 
 def _company_key(signal: OpportunitySignal) -> str:
-    return _canonical_company_text(signal.company)
+    return canonical_company_text(signal.company)
 
 
 def _is_generic_talentconnect_seed(signal: OpportunitySignal) -> bool:
@@ -80,7 +56,7 @@ def _is_generic_talentconnect_seed(signal: OpportunitySignal) -> bool:
 
 
 def _url_mentions_company(url: str, company: str | None) -> bool:
-    canonical = _canonical_company_text(company)
+    canonical = canonical_company_text(company)
     if canonical == "unknown":
         return False
     lowered = unquote(url).lower()
@@ -92,12 +68,7 @@ def _url_mentions_company(url: str, company: str | None) -> bool:
 
 
 def _sanitize_signal_source_urls(signal: OpportunitySignal) -> OpportunitySignal:
-    """Reject concrete job URLs that clearly belong to another employer.
-
-    Generic/short links are retained for later resolution. Secondary mirrors are
-    retained. Concrete employer/ATS links must either pass the official company
-    gate or at least carry the current company identity in the URL itself.
-    """
+    """Reject concrete job URLs that clearly belong to another employer."""
     kept: list[str] = []
     for url in signal.urls:
         lowered = unquote(url).lower()
@@ -111,6 +82,14 @@ def _sanitize_signal_source_urls(signal: OpportunitySignal) -> OpportunitySignal
     if kept == signal.urls:
         return signal
     return signal.model_copy(update={"urls": list(dict.fromkeys(kept))})
+
+
+def _normalize_extracted_signals(signals: list[OpportunitySignal]) -> list[OpportunitySignal]:
+    expanded: list[OpportunitySignal] = []
+    for signal in signals:
+        expanded.extend(expand_known_multi_role_signal(signal))
+    cleaned = [_sanitize_signal_source_urls(signal) for signal in expanded]
+    return dedupe_signals(cleaned)
 
 
 def _expired_job_record(
@@ -173,7 +152,7 @@ def research_career_email_for_catalog(
         fetch_linked_pdfs=fetch_linked_pdfs,
     )
     opportunities, extraction_metrics, extraction_errors = _extract(record, corpus)
-    opportunities = [_sanitize_signal_source_urls(signal) for signal in opportunities]
+    opportunities = _normalize_extracted_signals(opportunities)
     _ = source_links
 
     groups: dict[str, list[tuple[int, OpportunitySignal]]] = defaultdict(list)
@@ -225,7 +204,7 @@ def research_career_email_for_catalog(
                 source = (
                     "official"
                     if job.jd_status == "fetched_official"
-                    else "secondary"
+                    else "linkedin"
                     if job.jd_status == "fetched_secondary"
                     else "closed"
                     if job.availability_status == "closed_by_official"

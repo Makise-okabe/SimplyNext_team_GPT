@@ -15,6 +15,7 @@ from career_agent.job_research_quality import (
 from career_agent.models.email import EmailMessage
 from career_agent.models.job_record import JobRecord
 from career_agent.models.signal import OpportunitySignal
+from career_agent.tools.greenhouse import fetch_greenhouse_jobs, greenhouse_board_slug
 from career_agent.tools.web_fetch import FetchedPage, fetch_public_page
 from career_agent.tools.web_search import SearchResult, search_public_web
 
@@ -24,6 +25,8 @@ MAX_OFFICIAL_HOSTS = 2
 MAX_SOURCE_LANDING_LINKS = 8
 MAX_ROLE_FETCH_CANDIDATES = 3
 MAX_LINKEDIN_FETCH_CANDIDATES = 2
+MAX_GREENHOUSE_BOARDS = 2
+MAX_GREENHOUSE_ROLE_CANDIDATES = 3
 MIN_JD_CHARS = 500
 MIN_JD_TITLE_OVERLAP = 0.20
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
@@ -113,7 +116,7 @@ def _is_application_url(url: str) -> bool:
 
 def _is_linkedin_job_url(url: str | None) -> bool:
     value = host(url)
-    if value not in {"linkedin.com", "www.linkedin.com", "sg.linkedin.com"} and not value.endswith(".linkedin.com"):
+    if value != "linkedin.com" and not value.endswith(".linkedin.com"):
         return False
     try:
         return "/jobs" in urlparse(url or "").path.lower()
@@ -223,9 +226,11 @@ def _location(items: list[tuple[int, OpportunitySignal]]) -> str:
 class ResearchContext:
     search_cache: dict[str, list[SearchResult]] = field(default_factory=dict)
     page_cache: dict[str, FetchedPage | None] = field(default_factory=dict)
+    greenhouse_cache: dict[str, list] = field(default_factory=dict)
     page_errors: dict[str, str] = field(default_factory=dict)
     search_calls: int = 0
     fetch_calls: int = 0
+    greenhouse_calls: int = 0
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -254,6 +259,20 @@ class ResearchContext:
             return None
         self.page_cache[url] = page
         return page
+
+    def greenhouse_jobs(self, board_slug: str):
+        if board_slug in self.greenhouse_cache:
+            return self.greenhouse_cache[board_slug]
+        self.greenhouse_calls += 1
+        try:
+            jobs = fetch_greenhouse_jobs(board_slug, timeout_seconds=8.0)
+        except Exception as exc:
+            jobs = []
+            self.warnings.append(
+                f"Greenhouse board fetch failed: {board_slug}: {type(exc).__name__}: {exc}"
+            )
+        self.greenhouse_cache[board_slug] = jobs
+        return jobs
 
 
 @dataclass
@@ -353,8 +372,6 @@ def _try_official(state: RoleState, url: str, context: ResearchContext, *, direc
         state.evidence_summary.append("official employer/ATS page matched the circulated role")
         return True
 
-    # A concrete company-bound URL remains useful as the primary application
-    # reference even when its HTML is only a JS shell, but never counts as a JD.
     final_url = page.final_url or url
     if _is_concrete_job_url(final_url) and (direct or is_plausible_official_url(final_url, state.signal.company)):
         state.primary_url = final_url
@@ -399,8 +416,6 @@ def _rank_official_candidates(
         title_overlap = _title_overlap(state.signal.role_title, value)
         company_match = _company_match(state.signal.company, value)
         plausible = is_plausible_official_url(result.url, state.signal.company)
-        # Search metadata decides ordering, not final truth. Require only a weak
-        # indication here; the fetched page performs the final company+role check.
         if not plausible and not company_match and title_overlap < 0.35:
             continue
         scored.append((_official_score(state.signal, result, preferred_hosts=preferred_hosts), result))
@@ -462,6 +477,64 @@ def _fetch_ranked_official(
                 break
 
 
+def _greenhouse_board_candidates(company: str, results: list[SearchResult]) -> list[str]:
+    scored: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for result in results:
+        slug = greenhouse_board_slug(result.url)
+        if not slug or slug in seen:
+            continue
+        value = _result_text(result)
+        if not _company_match(company, value):
+            continue
+        score = 2 if "greenhouse" in result.url.lower() else 0
+        score += 2 if _company_match(company, result.title) else 0
+        scored.append((score, slug))
+        seen.add(slug)
+    scored.sort(reverse=True)
+    return [slug for _, slug in scored[:MAX_GREENHOUSE_BOARDS]]
+
+
+def _resolve_greenhouse(
+    states: list[RoleState],
+    company: str,
+    context: ResearchContext,
+    progress: ProgressCallback | None,
+) -> None:
+    unresolved = [state for state in states if not state.finished]
+    if not unresolved:
+        return
+
+    discovery_results: list[SearchResult] = []
+    for query in (
+        f'"{company}" jobs greenhouse',
+        f'"{company}" careers greenhouse',
+    ):
+        _say(progress, f"    Greenhouse discovery: {query}")
+        discovery_results.extend(context.search(query))
+
+    board_slugs = _greenhouse_board_candidates(company, discovery_results)
+    _say(progress, f"      Greenhouse boards={len(board_slugs)}")
+    for board_slug in board_slugs:
+        jobs = context.greenhouse_jobs(board_slug)
+        _say(progress, f"      Greenhouse board {board_slug}: jobs={len(jobs)}")
+        for state in [item for item in states if not item.finished]:
+            ranked: list[tuple[float, object]] = []
+            for job in jobs:
+                value = f"{job.title} {job.location}"
+                overlap = _title_overlap(state.signal.role_title, value)
+                if overlap < 0.50:
+                    continue
+                location_bonus = 0.1 if state.signal.location and _normalize(state.signal.location) in _normalize(job.location) else 0.0
+                ranked.append((overlap + location_bonus, job))
+            ranked.sort(key=lambda item: item[0], reverse=True)
+            candidates = [job for _, job in ranked[:MAX_GREENHOUSE_ROLE_CANDIDATES]]
+            _say(progress, f"      {state.signal.role_title}: Greenhouse candidates={len(candidates)}")
+            for job in candidates:
+                if _try_official(state, job.url, context, direct=True):
+                    break
+
+
 def research_company_jobs(*, email: EmailMessage, source_key: str, company_items: list[tuple[int, OpportunitySignal]], context: ResearchContext, progress: ProgressCallback | None = None) -> CompanyResearchOutcome:
     before_search = context.search_calls
     before_fetch = context.fetch_calls
@@ -519,9 +592,6 @@ def research_company_jobs(*, email: EmailMessage, source_key: str, company_items
             if value:
                 official_hosts.append(value)
         official_hosts = list(dict.fromkeys(official_hosts))[:MAX_OFFICIAL_HOSTS]
-
-        # Discovery results can themselves be exact job pages. Fetch only strong
-        # role candidates; pure careers landing pages remain host hints.
         exactish = [result for result in official_discovery if _is_concrete_job_url(result.url)]
         if exactish:
             _fetch_ranked_official(unresolved, exactish, context, progress)
@@ -547,15 +617,17 @@ def research_company_jobs(*, email: EmailMessage, source_key: str, company_items
                 if state.finished:
                     break
 
-    # If discovery did not identify a host, do one exact-role public search per
-    # unresolved role. This is intentionally not blocked by URL-shape heuristics.
+    # ATS fallback is company-bound and only resolves the roles circulated by the
+    # trusted source; it never adds unrelated employer vacancies to the catalog.
+    if any(not state.finished for state in states):
+        _resolve_greenhouse(states, company, context, progress)
+
     for state in [item for item in states if not item.finished and not official_hosts]:
         query = f'"{company}" "{state.signal.role_title}" {state.signal.location or "Singapore"} careers job'
         _say(progress, f"    targeted official search: {state.signal.role_title}")
         results = context.search(query)
         _fetch_ranked_official([state], results, context, progress)
 
-    # Strict secondary fallback: LinkedIn jobs only.
     for state in [item for item in states if not item.finished]:
         for url in _direct_secondary(state.signal)[:1]:
             if _try_secondary(state, url, context):

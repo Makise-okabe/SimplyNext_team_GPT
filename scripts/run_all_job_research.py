@@ -6,14 +6,12 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-# Allow this repository script to run directly from a fresh clone without
-# requiring callers to set PYTHONPATH manually. pytest already configures
-# pythonpath=["src"], but `python scripts/run_all_job_research.py` does not.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from career_agent.catalog_consolidation import consolidate_job_records
 from career_agent.connectors.outlook_graph import CAREER_SOURCE_BY_SENDER, OutlookGraphConnector
 from career_agent.job_catalog_pipeline import research_career_email_for_catalog
 from career_agent.matching_dataset import is_matching_ready, sanitize_job_sources
@@ -22,6 +20,7 @@ from career_agent.models.inbox import CareerEmailRecord
 DEFAULT_CATALOG_OUTPUT = Path("data/job_records/latest_job_catalog.json")
 DEFAULT_MATCHING_OUTPUT = Path("data/job_records/latest_job_records.json")
 DEFAULT_ARCHIVE_OUTPUT = Path("data/job_records/latest_job_records_archive.json")
+MIN_READY_COVERAGE = 0.60
 
 
 def _source_key(sender_email: str | None) -> str | None:
@@ -108,11 +107,11 @@ def main() -> None:
     print("SIMPLYNEXT TRACK B — CAREER EMAILS → OFFICIAL-FIRST JOB CATALOG")
     print("=" * 112)
     print("Trusted career emails selected:", len(messages))
-    print("Research strategy: group by company → official/ATS first → LinkedIn → other secondary")
+    print("Research strategy: source link → official/employer ATS → LinkedIn exact-role fallback")
     print("Judge LLM in web research: disabled")
 
     all_results = []
-    all_jobs = []
+    raw_jobs = []
 
     for email_index, email in enumerate(messages, start=1):
         source = _source_key(email.sender_email)
@@ -131,7 +130,7 @@ def main() -> None:
             progress=print,
         )
         all_results.append(result)
-        all_jobs.extend(sanitize_job_sources(job) for job in result.job_records)
+        raw_jobs.extend(sanitize_job_sources(job) for job in result.job_records)
 
         print("\nEMAIL SUMMARY")
         print("  opportunities :", len(result.opportunities))
@@ -150,22 +149,35 @@ def main() -> None:
             for error in result.errors[:6]:
                 print("    ERROR:", _short(error, 190))
 
-    matching_jobs = [job for job in all_jobs if is_matching_ready(job)]
-    catalog_jobs = [_catalog_job(job) for job in all_jobs]
+    canonical_jobs = consolidate_job_records(raw_jobs)
+    matching_jobs = [job for job in canonical_jobs if is_matching_ready(job)]
+    catalog_jobs = [_catalog_job(job) for job in canonical_jobs]
 
-    source_counts = Counter(job.source_key for job in all_jobs)
-    availability_counts = Counter(job.availability_status for job in all_jobs)
-    jd_counts = Counter(job.jd_status for job in all_jobs)
+    source_counts = Counter(job.source_key for job in canonical_jobs)
+    raw_source_counts = Counter(job.source_key for job in raw_jobs)
+    availability_counts = Counter(job.availability_status for job in canonical_jobs)
+    jd_counts = Counter(job.jd_status for job in canonical_jobs)
+    active_denominator = sum(
+        1
+        for job in canonical_jobs
+        if job.availability_status not in {"expired_by_source_deadline", "closed_by_official"}
+    )
+    coverage = len(matching_jobs) / active_denominator if active_denominator else 0.0
+    ready = coverage >= MIN_READY_COVERAGE
 
     catalog_payload = {
         "schema": "simplinext.job_catalog.v1",
         "purpose": (
-            "Canonical Goh Ze Li + TalentConnect job catalog consumed later by the "
+            "Canonical de-duplicated Goh Ze Li + TalentConnect job catalog consumed later by the "
             "resume/transcript matching and ranking agent."
         ),
         "job_count": len(catalog_jobs),
+        "raw_job_count": len(raw_jobs),
         "matching_ready_count": len(matching_jobs),
+        "matching_ready_coverage": round(coverage, 4),
+        "track_b_ready": ready,
         "source_counts": dict(source_counts),
+        "raw_source_counts": dict(raw_source_counts),
         "availability_counts": dict(availability_counts),
         "jd_counts": dict(jd_counts),
         "jobs": catalog_jobs,
@@ -174,13 +186,15 @@ def main() -> None:
     matching_payload = {
         "schema": "simplinext.job_records.matching.v1",
         "job_count": len(matching_jobs),
+        "coverage": round(coverage, 4),
         "jobs": [job.model_dump(mode="json") for job in matching_jobs],
     }
 
     archive_payload = {
         "schema": "simplinext.job_records.archive.v1",
-        "job_count": len(all_jobs),
-        "jobs": [job.model_dump(mode="json") for job in all_jobs],
+        "job_count": len(raw_jobs),
+        "canonical_job_count": len(canonical_jobs),
+        "jobs": [job.model_dump(mode="json") for job in raw_jobs],
         "source_results": [
             {
                 "source_key": result.source_key,
@@ -207,15 +221,24 @@ def main() -> None:
     print("\n" + "=" * 112)
     print("TRACK B JOB CATALOG SUMMARY")
     print("=" * 112)
-    print("Total JobRecords :", len(all_jobs))
-    print("By source        :", dict(source_counts))
+    print("Raw JobRecords   :", len(raw_jobs))
+    print("Canonical jobs   :", len(canonical_jobs))
+    print("Raw by source    :", dict(raw_source_counts))
+    print("Canonical source :", dict(source_counts))
     print("Availability     :", dict(availability_counts))
     print("JD status        :", dict(jd_counts))
     print("Matching-ready   :", len(matching_jobs))
+    print("Active coverage  :", f"{coverage:.1%}")
     print("Canonical catalog:", catalog_output)
     print("Full-JD subset   :", matching_output)
     print("Archive/provenance:", archive_output)
-    print("\nTrack B output is ready for a later Resume/Transcript ranking agent; matching was NOT run here.")
+    if ready:
+        print("\nTRACK B READY: JD coverage is sufficient to hand the canonical catalog to the ranking agent.")
+    else:
+        print(
+            "\nTRACK B NOT READY: full-JD coverage is below "
+            f"{MIN_READY_COVERAGE:.0%}; do not start Resume/Transcript ranking yet."
+        )
 
 
 if __name__ == "__main__":

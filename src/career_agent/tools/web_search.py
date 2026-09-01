@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -30,6 +31,48 @@ def _unwrap_duckduckgo_url(href: str) -> str:
     return unquote(target) if target else href
 
 
+def _decode_bing_target(value: str) -> str | None:
+    """Decode Bing's ``u=a1<base64-url>`` redirect target when present."""
+    target = unquote(value or "").strip()
+    if target.startswith(("http://", "https://")):
+        return target
+
+    # Bing HTML commonly wraps outbound links as:
+    #   https://www.bing.com/ck/a?...&u=a1aHR0cHM6Ly9leGFtcGxlLmNvbS8&...
+    # The ``a1`` prefix is metadata; the remainder is URL-safe base64.
+    if target.startswith("a1") and len(target) > 4:
+        payload = target[2:]
+        payload += "=" * ((4 - len(payload) % 4) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        if decoded.startswith(("http://", "https://")):
+            return decoded
+    return None
+
+
+def _unwrap_bing_url(href: str) -> str:
+    parsed = urlparse(href)
+    hostname = (parsed.hostname or "").lower()
+    if hostname not in {"bing.com", "www.bing.com"}:
+        return href
+
+    query = parse_qs(parsed.query)
+    for key in ("u", "url", "r"):
+        for value in query.get(key, []):
+            decoded = _decode_bing_target(value)
+            if decoded:
+                return decoded
+    return href
+
+
+def _normalize_result_url(href: str) -> str:
+    value = _unwrap_duckduckgo_url(href.strip())
+    value = _unwrap_bing_url(value)
+    return value
+
+
 def _simplify_query(query: str) -> str:
     value = query.replace('"', " ").replace("'", " ")
     value = re.sub(r"[(),|]+", " ", value)
@@ -37,12 +80,33 @@ def _simplify_query(query: str) -> str:
     return value.strip()
 
 
-def _append_result(results: list[SearchResult], seen: set[str], *, title: str, href: str, snippet: str = "") -> None:
-    url = _unwrap_duckduckgo_url(href.strip())
+def _append_result(
+    results: list[SearchResult],
+    seen: set[str],
+    *,
+    title: str,
+    href: str,
+    snippet: str = "",
+) -> None:
+    url = _normalize_result_url(href)
     if not url.startswith(("http://", "https://")) or url in seen:
         return
+
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    # A Bing click-tracking URL that could not be decoded is not a useful job
+    # candidate and would poison official/LinkedIn host classification downstream.
+    if hostname in {"bing.com", "www.bing.com"} and parsed.path.startswith("/ck/"):
+        return
+
     seen.add(url)
-    results.append(SearchResult(title=" ".join(title.split()), url=url, snippet=" ".join(snippet.split())))
+    results.append(
+        SearchResult(
+            title=" ".join(title.split()),
+            url=url,
+            snippet=" ".join(snippet.split()),
+        )
+    )
 
 
 def _parse_bing_results(html: str, max_results: int) -> list[SearchResult]:
@@ -111,9 +175,13 @@ def _parse_lite_results(html: str, max_results: int) -> list[SearchResult]:
     anchors = soup.select("a.result-link")
     if not anchors:
         anchors = [
-            anchor for anchor in soup.find_all("a", href=True)
+            anchor
+            for anchor in soup.find_all("a", href=True)
             if anchor.get_text(" ", strip=True)
-            and (anchor.get("href", "").startswith(("http://", "https://")) or "uddg=" in anchor.get("href", ""))
+            and (
+                anchor.get("href", "").startswith(("http://", "https://"))
+                or "uddg=" in anchor.get("href", "")
+            )
         ]
     for anchor in anchors:
         snippet = ""
@@ -122,13 +190,26 @@ def _parse_lite_results(html: str, max_results: int) -> list[SearchResult]:
             snippet_node = parent.find_next(class_="result-snippet")
             if snippet_node:
                 snippet = snippet_node.get_text(" ", strip=True)
-        _append_result(results, seen, title=anchor.get_text(" ", strip=True), href=anchor.get("href", ""), snippet=snippet)
+        _append_result(
+            results,
+            seen,
+            title=anchor.get_text(" ", strip=True),
+            href=anchor.get("href", ""),
+            snippet=snippet,
+        )
         if len(results) >= max_results:
             break
     return results
 
 
-def _request_search(url: str, query: str, *, parser, max_results: int, headers: dict[str, str]) -> list[SearchResult]:
+def _request_search(
+    url: str,
+    query: str,
+    *,
+    parser,
+    max_results: int,
+    headers: dict[str, str],
+) -> list[SearchResult]:
     response = httpx.get(
         url,
         params={"q": query},
@@ -171,7 +252,13 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
     for url, parser in providers:
         for variant in variants:
             try:
-                results = _request_search(url, variant, parser=parser, max_results=max_results, headers=headers)
+                results = _request_search(
+                    url,
+                    variant,
+                    parser=parser,
+                    max_results=max_results,
+                    headers=headers,
+                )
                 if results:
                     return results
             except Exception:

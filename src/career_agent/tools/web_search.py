@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ class SearchResult:
     snippet: str
 
 
+TAVILY_URL = "https://api.tavily.com/search"
 BING_URL = "https://www.bing.com/search"
 BING_RSS_URL = "https://www.bing.com/search?format=rss"
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
@@ -86,11 +88,6 @@ def _site_constraint(query: str) -> tuple[str, str] | None:
 
 
 def _relax_site_query(query: str) -> str:
-    """Replace ``site:host/path`` with a normal host/path keyword.
-
-    Some public search frontends ignore or badly implement site: queries. The
-    results are still filtered back to the requested site before being returned.
-    """
     match = SITE_PATTERN.search(query or "")
     if not match:
         return query
@@ -152,6 +149,39 @@ def _append_result(
             snippet=" ".join(snippet.split()),
         )
     )
+
+
+def _search_tavily(query: str, max_results: int) -> list[SearchResult]:
+    api_key = os.getenv("TAVILY_API_KEY", "").strip()
+    if not api_key:
+        return []
+    response = httpx.post(
+        TAVILY_URL,
+        json={
+            "api_key": api_key,
+            "query": query,
+            "search_depth": "basic",
+            "max_results": max_results,
+            "include_answer": False,
+            "include_raw_content": False,
+        },
+        timeout=SEARCH_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+    for item in payload.get("results", []):
+        _append_result(
+            results,
+            seen,
+            title=str(item.get("title") or ""),
+            href=str(item.get("url") or ""),
+            snippet=str(item.get("content") or ""),
+        )
+        if len(results) >= max_results:
+            break
+    return results
 
 
 def _parse_bing_results(html: str, max_results: int) -> list[SearchResult]:
@@ -271,7 +301,6 @@ def _search_variants(query: str, constraint: tuple[str, str] | None) -> list[str
     simplified = _simplify_query(query)
     if simplified and simplified not in variants:
         variants.append(simplified)
-
     if constraint is not None:
         relaxed = _relax_site_query(query)
         if relaxed and relaxed not in variants:
@@ -283,11 +312,11 @@ def _search_variants(query: str, constraint: tuple[str, str] | None) -> list[str
 
 
 def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
-    """Best-effort public search with site-safe relaxed fallback.
+    """Stable provider first, then zero-config public-search fallbacks.
 
-    A provider result only succeeds when it survives the requested site filter.
-    If strict ``site:`` syntax yields nothing, the same provider stack retries a
-    relaxed query while still enforcing that exact host/path on returned URLs.
+    Tavily is optional and used only when ``TAVILY_API_KEY`` is configured. All
+    providers still pass through the same site constraint, so a LinkedIn fallback
+    cannot accidentally return a non-LinkedIn page.
     """
     if not query.strip():
         return []
@@ -301,13 +330,25 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
     }
     constraint = _site_constraint(query)
     variants = _search_variants(query, constraint)
+
+    for variant in variants:
+        try:
+            tavily_results = _apply_site_constraint(
+                _search_tavily(variant, max_results),
+                constraint,
+                max_results,
+            )
+            if tavily_results:
+                return tavily_results
+        except Exception:
+            pass
+
     providers = (
         (BING_URL, _parse_bing_results),
         (BING_RSS_URL, _parse_bing_rss),
         (DUCKDUCKGO_HTML_URL, _parse_html_results),
         (DUCKDUCKGO_LITE_URL, _parse_lite_results),
     )
-
     for variant in variants:
         for url, parser in providers:
             try:

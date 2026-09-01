@@ -128,7 +128,16 @@ def test_same_company_roles_share_company_discovery_and_batch_official_search(mo
         return []
 
     def fake_fetch(url: str, timeout_seconds: float = 8.0):
-        index = int(url.rsplit("/", 1)[-1]) - 1
+        tail = url.rsplit("/", 1)[-1]
+        if tail == "jobs":
+            return FetchedPage(
+                requested_url=url,
+                final_url=url,
+                status_code=200,
+                title="Ley Choon Careers",
+                text="Ley Choon careers homepage",
+            )
+        index = int(tail) - 1
         signal = signals[index]
         return FetchedPage(
             requested_url=url,
@@ -154,7 +163,8 @@ def test_same_company_roles_share_company_discovery_and_batch_official_search(mo
     assert sum(1 for query in queries if " OR " in query) == 1
     assert not any("linkedin.com/jobs" in query.lower() for query in queries)
     assert outcome.search_calls == 2
-    assert outcome.fetch_calls == 3
+    # One cached careers-homepage probe + one exact page per role.
+    assert outcome.fetch_calls == 4
 
 
 def test_linkedin_runs_only_after_official_phase_does_not_produce_jd(monkeypatch) -> None:

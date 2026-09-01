@@ -48,18 +48,57 @@ def save_snapshot(
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def bootstrap_from_existing_catalog(
+def _signal_key(signal: OpportunitySignal) -> tuple[str, str]:
+    return (
+        " ".join((signal.company or "").lower().split()),
+        " ".join((signal.role_title or "").lower().split()),
+    )
+
+
+def _merge_signals(*groups: list[OpportunitySignal]) -> list[OpportunitySignal]:
+    merged: dict[tuple[str, str], OpportunitySignal] = {}
+    for group in groups:
+        for signal in group:
+            key = _signal_key(signal)
+            if not all(key):
+                continue
+            previous = merged.get(key)
+            if previous is None:
+                merged[key] = signal
+                continue
+            merged[key] = previous.model_copy(
+                update={
+                    "location": previous.location or signal.location,
+                    "opportunity_type": (
+                        previous.opportunity_type
+                        if previous.opportunity_type != "unknown"
+                        else signal.opportunity_type
+                    ),
+                    "deadline_hint": previous.deadline_hint or signal.deadline_hint,
+                    "target_major": list(dict.fromkeys([*previous.target_major, *signal.target_major])),
+                    "target_degree_level": list(
+                        dict.fromkeys([*previous.target_degree_level, *signal.target_degree_level])
+                    ),
+                    "urls": list(dict.fromkeys([*previous.urls, *signal.urls])),
+                    "raw_text": (
+                        previous.raw_text
+                        if len(previous.raw_text or "") >= len(signal.raw_text or "")
+                        else signal.raw_text
+                    ),
+                }
+            )
+    return list(merged.values())
+
+
+def recover_from_existing_catalog(
     *,
     source_key: str,
     source_message_id: str,
     source_name: str,
     source_date,
 ) -> list[OpportunitySignal]:
-    """Recover stable extraction evidence from a previous run of the same email.
-
-    This is only a repeat-run bootstrap. It never carries opportunities across a
-    different Outlook message id, so a new career email still gets fresh extraction.
-    """
+    """Recover prior evidence for this exact Outlook message without writing cache."""
+    recovered: list[OpportunitySignal] = []
     for path in LEGACY_BOOTSTRAP_PATHS:
         if not path.exists():
             continue
@@ -68,7 +107,6 @@ def bootstrap_from_existing_catalog(
         except Exception:
             continue
 
-        recovered: list[OpportunitySignal] = []
         for job in payload.get("jobs", []):
             if job.get("source_message_id") != source_message_id:
                 continue
@@ -101,10 +139,25 @@ def bootstrap_from_existing_catalog(
                 )
             except Exception:
                 continue
-        if recovered:
-            save_snapshot(source_key, source_message_id, recovered)
-            return recovered
-    return []
+    return _merge_signals(recovered)
+
+
+def bootstrap_from_existing_catalog(
+    *,
+    source_key: str,
+    source_message_id: str,
+    source_name: str,
+    source_date,
+) -> list[OpportunitySignal]:
+    recovered = recover_from_existing_catalog(
+        source_key=source_key,
+        source_message_id=source_message_id,
+        source_name=source_name,
+        source_date=source_date,
+    )
+    if recovered:
+        save_snapshot(source_key, source_message_id, recovered)
+    return recovered
 
 
 def load_or_bootstrap_snapshot(
@@ -114,12 +167,19 @@ def load_or_bootstrap_snapshot(
     source_name: str,
     source_date,
 ) -> list[OpportunitySignal]:
+    """Merge local snapshot with all prior evidence for the same Outlook message.
+
+    A partial snapshot must never permanently hide roles that existed in a previous
+    canonical/archive run of the exact same source message.
+    """
     cached = load_snapshot(source_key, source_message_id)
-    if cached:
-        return cached
-    return bootstrap_from_existing_catalog(
+    recovered = recover_from_existing_catalog(
         source_key=source_key,
         source_message_id=source_message_id,
         source_name=source_name,
         source_date=source_date,
     )
+    merged = _merge_signals(cached, recovered)
+    if merged and len(merged) != len(cached):
+        save_snapshot(source_key, source_message_id, merged)
+    return merged

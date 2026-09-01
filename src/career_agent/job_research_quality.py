@@ -68,6 +68,44 @@ DROP_EXACT_LINES = {
     "forgot password?",
 }
 
+JD_SIGNAL_GROUPS = (
+    (
+        "responsibilities",
+        "job responsibilities",
+        "key responsibilities",
+        "what you'll do",
+        "what you’ll do",
+        "what you will do",
+        "your role",
+    ),
+    (
+        "requirements",
+        "job requirements",
+        "qualifications",
+        "minimum qualifications",
+        "preferred qualifications",
+        "what we're looking for",
+        "what we’re looking for",
+        "who we're looking for",
+        "who we’re looking for",
+    ),
+    (
+        "job description",
+        "about the role",
+        "about this role",
+        "position summary",
+        "role overview",
+    ),
+    (
+        "apply now",
+        "apply for this job",
+        "apply for this role",
+        "employment type",
+        "job function",
+        "job type",
+    ),
+)
+
 
 def host(url: str | None) -> str:
     if not url:
@@ -196,6 +234,22 @@ def page_is_closed(text: str) -> bool:
     return any(marker in lowered for marker in CLOSED_MARKERS)
 
 
+def looks_like_job_description(text: str) -> bool:
+    """Require multiple independent employment/JD structure signals.
+
+    Long product, documentation, support, or marketing pages can accidentally
+    contain a role-title token and the word ``requirements``. One such marker is
+    not enough to make the page a job description.
+    """
+    lowered = " ".join((text or "").lower().split())
+    if not lowered:
+        return False
+    matched_groups = sum(
+        1 for markers in JD_SIGNAL_GROUPS if any(marker in lowered for marker in markers)
+    )
+    return matched_groups >= 2
+
+
 def clean_jd_text(text: str) -> str:
     if not text:
         return ""
@@ -228,4 +282,7 @@ def clean_jd_text(text: str) -> str:
         kept.append(line)
         previous = line
 
-    return "\n".join(kept).strip()
+    cleaned = "\n".join(kept).strip()
+    if not looks_like_job_description(cleaned):
+        return ""
+    return cleaned

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
@@ -13,15 +14,18 @@ class FetchedPage:
     status_code: int
     title: str
     text: str
+    links: tuple[str, ...] = ()
 
 
 def fetch_public_page(url: str, timeout_seconds: float = 12.0) -> FetchedPage:
-    """Fetch a public HTTP(S) page and return a compact text representation."""
+    """Fetch a public HTTP(S) page and return text plus public hyperlinks."""
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (compatible; SimplyNextCareerAgent/0.1; "
-            "+https://github.com/Makise-okabe/SimplyNext_team_GPT)"
-        )
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-SG,en;q=0.9",
     }
 
     with httpx.Client(
@@ -40,9 +44,25 @@ def fetch_public_page(url: str, timeout_seconds: float = 12.0) -> FetchedPage:
             status_code=response.status_code,
             title="",
             text="",
+            links=(),
         )
 
     soup = BeautifulSoup(response.text, "html.parser")
+    final_url = str(response.url)
+    links: list[str] = []
+    seen: set[str] = set()
+    for anchor in soup.find_all("a", href=True):
+        href = (anchor.get("href") or "").strip()
+        if not href:
+            continue
+        absolute = urljoin(final_url, href)
+        if not absolute.startswith(("http://", "https://")) or absolute in seen:
+            continue
+        seen.add(absolute)
+        links.append(absolute)
+        if len(links) >= 500:
+            break
+
     for tag in soup(["script", "style", "noscript", "svg"]):
         tag.decompose()
 
@@ -55,8 +75,9 @@ def fetch_public_page(url: str, timeout_seconds: float = 12.0) -> FetchedPage:
 
     return FetchedPage(
         requested_url=url,
-        final_url=str(response.url),
+        final_url=final_url,
         status_code=response.status_code,
         title=title,
-        text=text[:20000],
+        text=text[:30000],
+        links=tuple(links),
     )

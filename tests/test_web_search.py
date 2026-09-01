@@ -140,6 +140,41 @@ def test_site_scoped_search_falls_through_until_provider_returns_matching_domain
     assert web_search.BING_RSS_URL in calls
 
 
+def test_site_search_retries_relaxed_query_but_keeps_site_filter(monkeypatch) -> None:
+    queries: list[str] = []
+
+    def fake_request(url, query, *, parser, max_results, headers):
+        queries.append(query)
+        if "site:reolink.com" in query.lower():
+            return []
+        if "reolink.com" in query.lower():
+            return [
+                SearchResult(
+                    title="Backend Engineer - Reolink",
+                    url="https://www.reolink.com/careers/backend-engineer",
+                    snippet="Reolink Singapore backend engineering role",
+                ),
+                SearchResult(
+                    title="Wrong mirror",
+                    url="https://example.com/backend-engineer",
+                    snippet="Reolink backend engineer",
+                ),
+            ]
+        return []
+
+    monkeypatch.setattr(web_search, "_request_search", fake_request)
+    results = web_search.search_public_web(
+        'site:reolink.com "Backend Engineer" Singapore',
+        max_results=10,
+    )
+
+    assert [item.url for item in results] == [
+        "https://www.reolink.com/careers/backend-engineer"
+    ]
+    assert any("site:reolink.com" in query.lower() for query in queries)
+    assert any("reolink.com" in query.lower() and "site:reolink.com" not in query.lower() for query in queries)
+
+
 def test_host_canonicalizes_www_prefix() -> None:
     assert host("https://www.reolink.com/careers") == "reolink.com"
     assert host("https://reolink.com/careers") == "reolink.com"

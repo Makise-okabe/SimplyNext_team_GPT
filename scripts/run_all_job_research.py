@@ -2,8 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
+
+# Allow this repository script to run directly from a fresh clone without
+# requiring callers to set PYTHONPATH manually. pytest already configures
+# pythonpath=["src"], but `python scripts/run_all_job_research.py` does not.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 from career_agent.connectors.outlook_graph import CAREER_SOURCE_BY_SENDER, OutlookGraphConnector
 from career_agent.job_catalog_pipeline import research_career_email_for_catalog

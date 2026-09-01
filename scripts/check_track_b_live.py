@@ -22,7 +22,7 @@ from career_agent.job_catalog_pipeline import (
 )
 from career_agent.models.inbox import CareerEmailRecord
 
-DEFAULT_COMPANIES = ["P&G", "Reolink", "Tesla", "Point72"]
+DEFAULT_COMPANIES = ["Reolink", "Tesla", "Point72"]
 DEFAULT_OUTPUT = Path("data/job_records/track_b_live_check.json")
 
 
@@ -68,7 +68,7 @@ def _short(value: str | None, limit: int = 180) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Focused live Track B sanity check for a few Goh companies."
+        description="Focused live Track B sanity check for concrete circulated Goh roles."
     )
     parser.add_argument("--scan", type=int, default=30)
     parser.add_argument(
@@ -77,7 +77,7 @@ def main() -> None:
         dest="companies",
         help=(
             "Company to check. Repeat flag for multiple companies. "
-            "Defaults to P&G, Reolink, Tesla, Point72."
+            "Defaults to Reolink, Tesla, Point72."
         ),
     )
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
@@ -128,7 +128,7 @@ def main() -> None:
     print("Source received    :", getattr(goh, "received_at", None))
     print("Source message id  :", _short(goh.message_id, 120))
     print("Corpus chars       :", len(corpus))
-    print("\nExpected behavior: source link first → official exact role → LinkedIn fallback")
+    print("\nExpected behavior: source link first → official exact role → ATS → LinkedIn fallback")
 
     missing = [
         requested
@@ -204,6 +204,7 @@ def main() -> None:
         "roles": len(all_jobs),
         "web_search_calls": context.search_calls,
         "page_fetch_calls": context.fetch_calls,
+        "greenhouse_calls": context.greenhouse_calls,
         "search_trace": {
             query: [
                 {"title": item.title, "url": item.url, "snippet": item.snippet}
@@ -225,17 +226,18 @@ def main() -> None:
     print("\n" + "=" * 104)
     print("LIVE CHECK SUMMARY")
     print("=" * 104)
-    print("Roles        :", len(all_jobs))
-    print("Web searches :", context.search_calls)
-    print("Page fetches :", context.fetch_calls)
+    print("Roles           :", len(all_jobs))
+    print("Web searches    :", context.search_calls)
+    print("Page fetches    :", context.fetch_calls)
+    print("Greenhouse API  :", context.greenhouse_calls)
     print(
-        "Full JDs     :",
+        "Full JDs        :",
         sum(
             job.jd_status in {"fetched_official", "fetched_secondary"}
             for job in all_jobs
         ),
     )
-    print("Output       :", output)
+    print("Output          :", output)
 
 
 if __name__ == "__main__":

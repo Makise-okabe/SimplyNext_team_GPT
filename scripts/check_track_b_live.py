@@ -17,7 +17,7 @@ from career_agent.connectors.outlook_graph import CAREER_SOURCE_BY_SENDER, Outlo
 from career_agent.job_catalog_pipeline import (
     _canonical_company_text,
     _extract,
-    _sanitize_signal_source_urls,
+    _normalize_extracted_signals,
 )
 from career_agent.models.inbox import CareerEmailRecord
 
@@ -32,7 +32,10 @@ def _source_key(sender_email: str | None) -> str | None:
 def _matches_company(company: str | None, filters: list[str]) -> bool:
     canonical = _canonical_company_text(company)
     aliases = {_canonical_company_text(value) for value in filters}
-    return any(alias == canonical or alias in canonical or canonical in alias for alias in aliases)
+    return any(
+        alias == canonical or alias in canonical or canonical in alias
+        for alias in aliases
+    )
 
 
 def main() -> None:
@@ -44,7 +47,10 @@ def main() -> None:
         "--company",
         action="append",
         dest="companies",
-        help="Company to check. Repeat flag for multiple companies. Defaults to P&G, Reolink, Tesla, Point72.",
+        help=(
+            "Company to check. Repeat flag for multiple companies. "
+            "Defaults to P&G, Reolink, Tesla, Point72."
+        ),
     )
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     args = parser.parse_args()
@@ -64,12 +70,17 @@ def main() -> None:
         raise RuntimeError("No trusted Goh Ze Li email found in scan window.")
 
     record = CareerEmailRecord(source="goh_ze_li", email=goh)
-    corpus, _, _, source_warnings = build_source_corpus(goh, fetch_linked_pdfs=True)
+    corpus, _, _, source_warnings = build_source_corpus(
+        goh,
+        fetch_linked_pdfs=True,
+    )
     opportunities, metrics, extraction_errors = _extract(record, corpus)
-    opportunities = [_sanitize_signal_source_urls(signal) for signal in opportunities]
+    opportunities = _normalize_extracted_signals(opportunities)
 
     selected = [
-        signal for signal in opportunities if _matches_company(signal.company, companies)
+        signal
+        for signal in opportunities
+        if _matches_company(signal.company, companies)
     ]
     if not selected:
         raise RuntimeError(f"No opportunities matched companies: {companies}")
@@ -87,12 +98,23 @@ def main() -> None:
     print("Extraction LLM     :", metrics.llm_calls)
     print("\nExpected behavior: source link first → official exact role → LinkedIn fallback")
 
+    missing = [
+        requested
+        for requested in companies
+        if not any(_matches_company(signal.company, [requested]) for signal in opportunities)
+    ]
+    if missing:
+        print("Companies absent after production normalization:", ", ".join(missing))
+
     context = ResearchContext()
     all_jobs = []
     for company_index, (_, items) in enumerate(groups.items(), start=1):
         company = items[0][1].company or "<unknown>"
         print("\n" + "-" * 104)
-        print(f"COMPANY {company_index}/{len(groups)} | {company} | {len(items)} role(s)")
+        print(
+            f"COMPANY {company_index}/{len(groups)} | "
+            f"{company} | {len(items)} role(s)"
+        )
         for _, signal in items:
             print(f"  SOURCE | {signal.role_title}")
             for url in signal.urls:
@@ -129,7 +151,10 @@ def main() -> None:
     }
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    output.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
     print("\n" + "=" * 104)
     print("LIVE CHECK SUMMARY")
@@ -137,7 +162,13 @@ def main() -> None:
     print("Roles        :", len(all_jobs))
     print("Web searches :", context.search_calls)
     print("Page fetches :", context.fetch_calls)
-    print("Full JDs     :", sum(job.jd_status in {"fetched_official", "fetched_secondary"} for job in all_jobs))
+    print(
+        "Full JDs     :",
+        sum(
+            job.jd_status in {"fetched_official", "fetched_secondary"}
+            for job in all_jobs
+        ),
+    )
     print("Output       :", output)
 
 

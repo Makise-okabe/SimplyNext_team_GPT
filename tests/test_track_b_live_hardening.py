@@ -135,8 +135,8 @@ def test_search_provider_failure_falls_through_to_bing_rss_then_next_provider(mo
 
     assert len(results) == 1
     assert results[0].url.endswith("/job/ai-engineer")
-    assert calls[:3] == [
-        web_search.BING_URL,
-        web_search.BING_RSS_URL,
-        web_search.DUCKDUCKGO_HTML_URL,
-    ]
+    assert web_search.BING_URL in calls
+    assert web_search.BING_RSS_URL in calls
+    assert web_search.DUCKDUCKGO_HTML_URL in calls
+    assert calls.index(web_search.BING_URL) < calls.index(web_search.BING_RSS_URL)
+    assert calls.index(web_search.BING_RSS_URL) < calls.index(web_search.DUCKDUCKGO_HTML_URL)

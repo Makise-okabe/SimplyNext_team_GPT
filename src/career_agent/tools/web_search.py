@@ -22,6 +22,7 @@ BING_RSS_URL = "https://www.bing.com/search?format=rss"
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 DUCKDUCKGO_LITE_URL = "https://lite.duckduckgo.com/lite/"
 SEARCH_TIMEOUT_SECONDS = 6.0
+SITE_PATTERN = re.compile(r"(?i)(?:^|\s)site:([^\s\"']+)")
 
 
 def _unwrap_duckduckgo_url(href: str) -> str:
@@ -36,10 +37,6 @@ def _decode_bing_target(value: str) -> str | None:
     target = unquote(value or "").strip()
     if target.startswith(("http://", "https://")):
         return target
-
-    # Bing HTML commonly wraps outbound links as:
-    #   https://www.bing.com/ck/a?...&u=a1aHR0cHM6Ly9leGFtcGxlLmNvbS8&...
-    # The ``a1`` prefix is metadata; the remainder is URL-safe base64.
     if target.startswith("a1") and len(target) > 4:
         payload = target[2:]
         payload += "=" * ((4 - len(payload) % 4) % 4)
@@ -57,7 +54,6 @@ def _unwrap_bing_url(href: str) -> str:
     hostname = (parsed.hostname or "").lower()
     if hostname not in {"bing.com", "www.bing.com"}:
         return href
-
     query = parse_qs(parsed.query)
     for key in ("u", "url", "r"):
         for value in query.get(key, []):
@@ -69,8 +65,49 @@ def _unwrap_bing_url(href: str) -> str:
 
 def _normalize_result_url(href: str) -> str:
     value = _unwrap_duckduckgo_url(href.strip())
-    value = _unwrap_bing_url(value)
-    return value
+    return _unwrap_bing_url(value)
+
+
+def _normalize_host(value: str) -> str:
+    host_value = (value or "").lower().split(":", 1)[0]
+    return host_value[4:] if host_value.startswith("www.") else host_value
+
+
+def _site_constraint(query: str) -> tuple[str, str] | None:
+    match = SITE_PATTERN.search(query or "")
+    if not match:
+        return None
+    raw = match.group(1).strip().rstrip("/")
+    parsed = urlparse("https://" + raw)
+    target_host = _normalize_host(parsed.hostname or "")
+    target_path = parsed.path.rstrip("/")
+    if not target_host:
+        return None
+    return target_host, target_path
+
+
+def _result_matches_site(result: SearchResult, constraint: tuple[str, str] | None) -> bool:
+    if constraint is None:
+        return True
+    target_host, target_path = constraint
+    parsed = urlparse(result.url)
+    result_host = _normalize_host(parsed.hostname or "")
+    if result_host != target_host and not result_host.endswith("." + target_host):
+        return False
+    if target_path:
+        path = parsed.path.rstrip("/")
+        return path == target_path or path.startswith(target_path + "/")
+    return True
+
+
+def _apply_site_constraint(
+    results: list[SearchResult],
+    constraint: tuple[str, str] | None,
+    max_results: int,
+) -> list[SearchResult]:
+    if constraint is None:
+        return results[:max_results]
+    return [result for result in results if _result_matches_site(result, constraint)][:max_results]
 
 
 def _simplify_query(query: str) -> str:
@@ -91,14 +128,10 @@ def _append_result(
     url = _normalize_result_url(href)
     if not url.startswith(("http://", "https://")) or url in seen:
         return
-
     parsed = urlparse(url)
     hostname = (parsed.hostname or "").lower()
-    # A Bing click-tracking URL that could not be decoded is not a useful job
-    # candidate and would poison official/LinkedIn host classification downstream.
     if hostname in {"bing.com", "www.bing.com"} and parsed.path.startswith("/ck/"):
         return
-
     seen.add(url)
     results.append(
         SearchResult(
@@ -222,11 +255,7 @@ def _request_search(
 
 
 def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
-    """Best-effort public search with provider/parser isolation.
-
-    Order: Bing HTML -> Bing RSS -> DuckDuckGo HTML -> DuckDuckGo Lite.
-    Empty/blocked HTML never poisons later jobs or later providers.
-    """
+    """Best-effort public search with provider/parser and site-filter isolation."""
     if not query.strip():
         return []
 
@@ -242,6 +271,7 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
     if simplified and simplified != variants[0]:
         variants.append(simplified)
 
+    constraint = _site_constraint(query)
     providers = (
         (BING_URL, _parse_bing_results),
         (BING_RSS_URL, _parse_bing_rss),
@@ -252,13 +282,14 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
     for url, parser in providers:
         for variant in variants:
             try:
-                results = _request_search(
+                raw_results = _request_search(
                     url,
                     variant,
                     parser=parser,
                     max_results=max_results,
                     headers=headers,
                 )
+                results = _apply_site_constraint(raw_results, constraint, max_results)
                 if results:
                     return results
             except Exception:

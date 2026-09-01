@@ -1,6 +1,7 @@
 from career_agent.job_research_quality import (
     clean_jd_text,
     is_plausible_official_url,
+    looks_like_job_description,
     page_is_closed,
 )
 
@@ -46,3 +47,24 @@ LinkedIn
     assert "Similar jobs" not in cleaned
     assert "Random Micron role" not in cleaned
     assert "Random Google role" not in cleaned
+
+
+def test_long_support_manual_page_is_not_accepted_as_job_description() -> None:
+    raw = (
+        "Reolink Software and Manual Download Center\n"
+        "System Requirements\nWindows 11, macOS and mobile application support.\n"
+        + ("Camera firmware software installation troubleshooting documentation. " * 80)
+        + "\nSite reliability engineer may refer to network reliability terminology."
+    )
+    assert not looks_like_job_description(raw)
+    assert clean_jd_text(raw) == ""
+
+
+def test_real_job_page_requires_multiple_independent_jd_signals() -> None:
+    raw = (
+        "AI Engineer\nExample Robotics\nResponsibilities\n"
+        + ("Build and deploy production machine learning systems. " * 30)
+        + "\nQualifications\nDegree in engineering or computer science."
+    )
+    assert looks_like_job_description(raw)
+    assert "Build and deploy" in clean_jd_text(raw)

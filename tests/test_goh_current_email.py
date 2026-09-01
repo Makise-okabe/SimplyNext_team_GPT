@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 
 from career_agent.all_job_extraction import ExtractionMetrics
+from career_agent import goh_extraction
 from career_agent.goh_extraction import _parse_deadline, extract_goh_opportunities
+from career_agent.models.signal import OpportunitySignal
 
 
 def _empty_base(**kwargs):
@@ -68,6 +70,43 @@ ICT | Reolink | AI Engineer | 6a123456789012001d123456 | Deadline: 3 Nov 2026
     )
 
     assert [(item.company, item.role_title) for item in opportunities] == [("Reolink", "AI Engineer")]
+    assert metrics.llm_calls == 0
+    assert errors == []
+
+
+def test_repeat_goh_email_uses_snapshot_before_llm(monkeypatch) -> None:
+    source_date = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    cached = [
+        OpportunitySignal(
+            source_type="outlook",
+            source_name="Goh Ze Li",
+            source_message_id="cached-message",
+            source_date=source_date,
+            company="P&G",
+            role_title="HR (Summer 2027 Internship)",
+            opportunity_type="internship",
+            urls=["https://www.pgcareers.com/sg/en/internships"],
+            raw_text="P&G – Internships (Summer 2027) – HR",
+        )
+    ]
+
+    monkeypatch.setattr(
+        goh_extraction,
+        "load_or_bootstrap_snapshot",
+        lambda **kwargs: cached,
+    )
+    monkeypatch.setattr(goh_extraction, "save_snapshot", lambda *args, **kwargs: None)
+
+    opportunities, metrics, errors = extract_goh_opportunities(
+        source_name="Goh Ze Li",
+        source_message_id="cached-message",
+        source_date=source_date,
+        corpus="SOURCE: EMAIL\nP&G internship opportunities are available for Summer 2027.",
+    )
+
+    assert [(item.company, item.role_title) for item in opportunities] == [
+        ("P&G", "HR (Summer 2027 Internship)")
+    ]
     assert metrics.llm_calls == 0
     assert errors == []
 

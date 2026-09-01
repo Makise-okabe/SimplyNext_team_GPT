@@ -47,6 +47,31 @@ Information Communication Technology | AvePoint Singapore | Backend Developer | 
     assert metrics.llm_calls == 0
 
 
+def test_table_only_goh_email_never_calls_optional_base_extractor() -> None:
+    corpus = """SOURCE: EMAIL
+JOBS
+[[SIMPLYNEXT_TABLE_START]]
+INDUSTRY | COMPANY | ROLE | TC ID | REMARKS
+ICT | Reolink | AI Engineer | 6a123456789012001d123456 | Deadline: 3 Nov 2026
+[[SIMPLYNEXT_TABLE_END]]
+"""
+
+    def exploding_base(**kwargs):
+        raise AssertionError("optional base extractor must not run for table-only Goh email")
+
+    opportunities, metrics, errors = extract_goh_opportunities(
+        source_name="Goh Ze Li",
+        source_message_id="table-only",
+        source_date=datetime(2026, 8, 31, tzinfo=timezone.utc),
+        corpus=corpus,
+        base_extractor=exploding_base,
+    )
+
+    assert [(item.company, item.role_title) for item in opportunities] == [("Reolink", "AI Engineer")]
+    assert metrics.llm_calls == 0
+    assert errors == []
+
+
 def test_goh_deadline_variants_with_spaced_ordinal() -> None:
     source_date = datetime(2026, 8, 27, tzinfo=timezone.utc)
     assert _parse_deadline("Deadline: 5 th Dec 2026", source_date).isoformat() == "2026-12-05"

@@ -41,6 +41,13 @@ def test_generic_ats_url_must_match_current_company() -> None:
     assert not is_plausible_official_url(keppel, "Ernst & Young Solutions LLP")
 
 
+def test_pgcareers_is_recognized_as_pg_official_brand_host() -> None:
+    assert is_plausible_official_url(
+        "https://www.pgcareers.com/sg/en/internships",
+        "P&G",
+    )
+
+
 def test_goh_structured_row_does_not_inherit_global_wrong_company_url() -> None:
     wrong = "https://employmenthero.com/sg/jobs/position/transcelestial-software-engineer/"
     corpus = f"""SOURCE: EMAIL
@@ -104,13 +111,15 @@ def test_generic_talentconnect_lead_is_not_a_concrete_job() -> None:
     )
 
 
-def test_search_provider_failure_falls_through_to_next_provider(monkeypatch) -> None:
+def test_search_provider_failure_falls_through_to_bing_rss_then_next_provider(monkeypatch) -> None:
     calls: list[str] = []
 
     def fake_request(url, query, *, parser, max_results, headers):
         calls.append(url)
         if url == web_search.BING_URL:
-            raise RuntimeError("provider blocked")
+            raise RuntimeError("html provider blocked")
+        if url == web_search.BING_RSS_URL:
+            return []
         if url == web_search.DUCKDUCKGO_HTML_URL:
             return [
                 SearchResult(
@@ -126,4 +135,8 @@ def test_search_provider_failure_falls_through_to_next_provider(monkeypatch) -> 
 
     assert len(results) == 1
     assert results[0].url.endswith("/job/ai-engineer")
-    assert calls[:2] == [web_search.BING_URL, web_search.DUCKDUCKGO_HTML_URL]
+    assert calls[:3] == [
+        web_search.BING_URL,
+        web_search.BING_RSS_URL,
+        web_search.DUCKDUCKGO_HTML_URL,
+    ]

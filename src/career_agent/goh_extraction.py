@@ -136,7 +136,10 @@ def _structured_signals(
             if not company or not role_cell:
                 continue
 
-            urls = list(dict.fromkeys(extract_links_from_text(" | ".join(cells))))
+            # Structured Goh rows are authoritative for source URLs.  Only URLs
+            # physically present in this exact row may be attached to its roles.
+            # Never inherit an LLM/global-corpus guessed URL from another row.
+            row_urls = list(dict.fromkeys(extract_links_from_text(" | ".join(cells))))
             for role in _split_numbered_roles(role_cell):
                 if not role or role.lower().startswith("role"):
                     continue
@@ -151,7 +154,7 @@ def _structured_signals(
                         location=_location(remarks),
                         opportunity_type=_opportunity_type(section, role, remarks),
                         deadline_hint=_parse_deadline(remarks, source_date),
-                        urls=urls,
+                        urls=row_urls,
                         raw_text=" | ".join(cells),
                         resolution_status="unresolved",
                     )
@@ -174,7 +177,7 @@ def extract_goh_opportunities(
     corpus: str,
     base_extractor=extract_all_opportunities,
 ) -> tuple[list[OpportunitySignal], ExtractionMetrics, list[str]]:
-    """Keep the proven extractor, then deterministically repair/expand Goh tables."""
+    """Keep non-table extraction, but make deterministic Goh rows authoritative."""
     base, metrics, errors = base_extractor(
         source_name=source_name,
         source_message_id=source_message_id,
@@ -188,11 +191,19 @@ def extract_goh_opportunities(
         corpus=corpus,
     )
 
+    robust_keys = {_key(signal) for signal in robust}
     merged: dict[tuple[str, str], OpportunitySignal] = {}
+
+    # Base extraction is still useful for natural-language opportunities outside
+    # the table. For roles that also exist in the deterministic table, however,
+    # do not import base URLs because those may have been reattached globally.
     for signal in base:
         if len(_split_numbered_roles(signal.role_title or "")) > 1:
             continue
-        merged[_key(signal)] = signal
+        key = _key(signal)
+        if key in robust_keys:
+            signal = signal.model_copy(update={"urls": []})
+        merged[key] = signal
 
     for signal in robust:
         key = _key(signal)
@@ -205,7 +216,9 @@ def extract_goh_opportunities(
                 "deadline_hint": signal.deadline_hint or previous.deadline_hint,
                 "location": signal.location or previous.location,
                 "opportunity_type": signal.opportunity_type,
-                "urls": list(dict.fromkeys([*previous.urls, *signal.urls])),
+                # Row-local deterministic URLs replace, rather than merge with,
+                # any globally guessed URLs from the base extractor.
+                "urls": signal.urls,
                 "raw_text": signal.raw_text or previous.raw_text,
             }
         )

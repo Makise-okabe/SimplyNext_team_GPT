@@ -10,7 +10,6 @@ from career_agent.job_research_quality import (
     host,
     is_aggregator_url,
     is_plausible_official_url,
-    is_secondary_url,
     page_is_closed,
 )
 from career_agent.models.email import EmailMessage
@@ -23,10 +22,10 @@ ROLE_BATCH_SIZE = 4
 MAX_SEARCH_RESULTS = 10
 MAX_OFFICIAL_HOSTS = 2
 MAX_SOURCE_LANDING_LINKS = 8
+MAX_ROLE_FETCH_CANDIDATES = 3
+MAX_LINKEDIN_FETCH_CANDIDATES = 2
 MIN_JD_CHARS = 500
 MIN_JD_TITLE_OVERLAP = 0.20
-MIN_OFFICIAL_SCORE = 45.0
-MIN_SECONDARY_SCORE = 30.0
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 APPLICATION_HOSTS = {
     "forms.office.com",
@@ -112,6 +111,16 @@ def _is_application_url(url: str) -> bool:
         return False
 
 
+def _is_linkedin_job_url(url: str | None) -> bool:
+    value = host(url)
+    if value not in {"linkedin.com", "www.linkedin.com", "sg.linkedin.com"} and not value.endswith(".linkedin.com"):
+        return False
+    try:
+        return "/jobs" in urlparse(url or "").path.lower()
+    except ValueError:
+        return False
+
+
 def _is_concrete_job_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
@@ -124,7 +133,7 @@ def _is_concrete_job_url(url: str) -> bool:
         return True
     if any(marker in fragment for marker in ("/job/", "/jobs/", "jobid=", "jobcode=")):
         return True
-    if any(marker in path for marker in ("/job/", "/jobdetail", "/job-detail", "/position/", "/career/")):
+    if any(marker in path for marker in ("/job/", "/jobdetail", "/job-detail", "/position/", "/career/", "/internship/")):
         return True
     jobs_index = path.find("/jobs/")
     return jobs_index >= 0 and len(path[jobs_index + len("/jobs/"):].strip("/")) >= 2
@@ -148,18 +157,21 @@ def _looks_official(signal: OpportunitySignal, result: SearchResult) -> bool:
         return False
     careerish = any(
         marker in f"{parsed.netloc.lower()} {parsed.path.lower()}"
-        for marker in ("career", "jobs", "job", "recruit", "workday", "greenhouse", "lever", "position", "vacanc")
+        for marker in ("career", "jobs", "job", "recruit", "workday", "greenhouse", "lever", "position", "vacanc", "internship")
     )
     return careerish
 
 
-def _official_score(signal: OpportunitySignal, result: SearchResult) -> float:
+def _official_score(signal: OpportunitySignal, result: SearchResult, *, preferred_hosts: set[str] | None = None) -> float:
     value = _result_text(result)
-    score = 20.0
-    score += 55.0 * _title_overlap(signal.role_title, value)
+    score = 10.0 + 55.0 * _title_overlap(signal.role_title, value)
     if _is_concrete_job_url(result.url):
         score += 10.0
     if _company_match(signal.company, value):
+        score += 15.0
+    if is_plausible_official_url(result.url, signal.company):
+        score += 15.0
+    if preferred_hosts and host(result.url) in preferred_hosts:
         score += 15.0
     if signal.location and _normalize(signal.location) in _normalize(value):
         score += 5.0
@@ -171,8 +183,8 @@ def _secondary_score(signal: OpportunitySignal, result: SearchResult) -> float:
     score = 10.0 + 55.0 * _title_overlap(signal.role_title, value)
     if _company_match(signal.company, value):
         score += 15.0
-    if "linkedin.com" in host(result.url):
-        score += 15.0
+    if _is_linkedin_job_url(result.url):
+        score += 20.0
     if signal.location and _normalize(signal.location) in _normalize(value):
         score += 5.0
     return min(100.0, score)
@@ -305,7 +317,7 @@ def _direct_official_landings(signal: OpportunitySignal) -> list[str]:
 
 
 def _direct_secondary(signal: OpportunitySignal) -> list[str]:
-    return [url for url in signal.urls if is_secondary_url(url)]
+    return [url for url in signal.urls if _is_linkedin_job_url(url)]
 
 
 def _application_url(signal: OpportunitySignal) -> str | None:
@@ -318,7 +330,8 @@ def _try_official(state: RoleState, url: str, context: ResearchContext, *, direc
     page = context.fetch(url)
     if page is None:
         return False
-    page_matches = direct or _page_matches(page, state.signal)
+
+    page_matches = _page_matches(page, state.signal)
     if page_is_closed(page.text) and page_matches:
         state.primary_url = page.final_url or url
         state.availability_status = "closed_by_official"
@@ -327,6 +340,7 @@ def _try_official(state: RoleState, url: str, context: ResearchContext, *, direc
         state.research_basis = "official_page_closed"
         state.evidence_summary.append("official employer/ATS page says the role is closed")
         return True
+
     cleaned, reason = _usable_jd(page, state.signal)
     if cleaned and page_matches:
         state.primary_url = page.final_url or url
@@ -338,15 +352,19 @@ def _try_official(state: RoleState, url: str, context: ResearchContext, *, direc
         state.research_basis = "official_company_or_ats_page"
         state.evidence_summary.append("official employer/ATS page matched the circulated role")
         return True
-    if _is_concrete_job_url(page.final_url or url):
-        state.primary_url = page.final_url or url
+
+    # A concrete company-bound URL remains useful as the primary application
+    # reference even when its HTML is only a JS shell, but never counts as a JD.
+    final_url = page.final_url or url
+    if _is_concrete_job_url(final_url) and (direct or is_plausible_official_url(final_url, state.signal.company)):
+        state.primary_url = final_url
     state.warnings.append(f"official candidate did not yield usable JD: {url}: {reason or 'unverified'}")
     return False
 
 
 def _try_secondary(state: RoleState, url: str, context: ResearchContext) -> bool:
-    if state.finished:
-        return True
+    if state.finished or not _is_linkedin_job_url(url):
+        return state.finished
     page = context.fetch(url)
     if page is None:
         return False
@@ -358,41 +376,56 @@ def _try_secondary(state: RoleState, url: str, context: ResearchContext) -> bool
         state.jd_text = cleaned
         state.research_status = "secondary_corroborated"
         state.research_confidence = "medium"
-        state.research_basis = "official_primary_with_secondary_jd" if state.primary_url else "secondary_same_job_evidence"
-        state.evidence_summary.append("secondary public job page matched the circulated role and supplied the JD")
+        state.research_basis = "official_primary_with_linkedin_jd" if state.primary_url else "linkedin_same_job_evidence"
+        state.evidence_summary.append("LinkedIn job page matched the circulated role and supplied the JD")
         return True
-    state.warnings.append(f"secondary candidate did not yield usable JD: {url}: {reason or 'unverified'}")
+    state.warnings.append(f"LinkedIn candidate did not yield usable JD: {url}: {reason or 'unverified'}")
     return False
 
 
-def _map_official(states: list[RoleState], results: list[SearchResult]) -> dict[int, list[tuple[float, SearchResult]]]:
-    mapped = {state.index: [] for state in states}
+def _rank_official_candidates(
+    state: RoleState,
+    results: list[SearchResult],
+    *,
+    preferred_hosts: set[str] | None = None,
+) -> list[SearchResult]:
+    scored: list[tuple[float, SearchResult]] = []
     for result in results:
-        for state in states:
-            if state.finished or not _looks_official(state.signal, result):
-                continue
-            score = _official_score(state.signal, result)
-            if score >= MIN_OFFICIAL_SCORE:
-                mapped[state.index].append((score, result))
-    for values in mapped.values():
-        values.sort(key=lambda item: item[0], reverse=True)
-    return mapped
-
-
-def _map_secondary(states: list[RoleState], results: list[SearchResult]) -> dict[int, list[tuple[float, SearchResult]]]:
-    mapped = {state.index: [] for state in states}
-    for result in results:
-        if not is_secondary_url(result.url):
+        if is_aggregator_url(result.url) or _is_application_url(result.url):
             continue
-        for state in states:
-            if state.finished:
-                continue
-            score = _secondary_score(state.signal, result)
-            if score >= MIN_SECONDARY_SCORE:
-                mapped[state.index].append((score, result))
-    for values in mapped.values():
-        values.sort(key=lambda item: item[0], reverse=True)
-    return mapped
+        if preferred_hosts and host(result.url) not in preferred_hosts:
+            continue
+        value = _result_text(result)
+        title_overlap = _title_overlap(state.signal.role_title, value)
+        company_match = _company_match(state.signal.company, value)
+        plausible = is_plausible_official_url(result.url, state.signal.company)
+        # Search metadata decides ordering, not final truth. Require only a weak
+        # indication here; the fetched page performs the final company+role check.
+        if not plausible and not company_match and title_overlap < 0.35:
+            continue
+        scored.append((_official_score(state.signal, result, preferred_hosts=preferred_hosts), result))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    seen: set[str] = set()
+    ranked: list[SearchResult] = []
+    for _, result in scored:
+        if result.url in seen:
+            continue
+        seen.add(result.url)
+        ranked.append(result)
+    return ranked
+
+
+def _rank_linkedin_candidates(state: RoleState, results: list[SearchResult]) -> list[SearchResult]:
+    scored: list[tuple[float, SearchResult]] = []
+    for result in results:
+        if not _is_linkedin_job_url(result.url):
+            continue
+        value = _result_text(result)
+        if not _company_match(state.signal.company, value) and _title_overlap(state.signal.role_title, value) < 0.35:
+            continue
+        scored.append((_secondary_score(state.signal, result), result))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [result for _, result in scored]
 
 
 def _candidate_links_from_landing(page: FetchedPage, state: RoleState) -> list[str]:
@@ -411,13 +444,40 @@ def _candidate_links_from_landing(page: FetchedPage, state: RoleState) -> list[s
     return [url for _, url in scored[:MAX_SOURCE_LANDING_LINKS]]
 
 
+def _fetch_ranked_official(
+    states: list[RoleState],
+    results: list[SearchResult],
+    context: ResearchContext,
+    progress: ProgressCallback | None,
+    *,
+    preferred_hosts: set[str] | None = None,
+) -> None:
+    for state in states:
+        if state.finished:
+            continue
+        candidates = _rank_official_candidates(state, results, preferred_hosts=preferred_hosts)
+        _say(progress, f"      {state.signal.role_title}: search results={len(results)}, fetch candidates={min(len(candidates), MAX_ROLE_FETCH_CANDIDATES)}")
+        for candidate in candidates[:MAX_ROLE_FETCH_CANDIDATES]:
+            if _try_official(state, candidate.url, context):
+                break
+
+
 def research_company_jobs(*, email: EmailMessage, source_key: str, company_items: list[tuple[int, OpportunitySignal]], context: ResearchContext, progress: ProgressCallback | None = None) -> CompanyResearchOutcome:
     before_search = context.search_calls
     before_fetch = context.fetch_calls
     before_warning = len(context.warnings)
     before_error = len(context.errors)
 
-    states = [RoleState(index=index, signal=signal, availability_status="active_candidate" if signal.deadline_hint else "unknown", application_url=_application_url(signal), evidence_summary=["trusted NUS career source circulated this opportunity"]) for index, signal in company_items]
+    states = [
+        RoleState(
+            index=index,
+            signal=signal,
+            availability_status="active_candidate" if signal.deadline_hint else "unknown",
+            application_url=_application_url(signal),
+            evidence_summary=["trusted NUS career source circulated this opportunity"],
+        )
+        for index, signal in company_items
+    ]
     company = next((state.signal.company for state in states if state.signal.company), "<unknown>")
     _say(progress, f"  official-first research: {company} ({len(states)} role(s))")
 
@@ -449,20 +509,26 @@ def research_company_jobs(*, email: EmailMessage, source_key: str, company_items
         query = f'"{company}" careers jobs {_location(company_items)}'.strip()
         _say(progress, f"    discover official host: {query}")
         discovery = context.search(query)
-        official_discovery = [result for result in discovery if any(_looks_official(state.signal, result) for state in unresolved)]
+        _say(progress, f"      discovery results={len(discovery)}")
+        official_discovery = [
+            result for result in discovery
+            if any(_looks_official(state.signal, result) for state in unresolved)
+        ]
         for result in official_discovery:
             value = host(result.url)
             if value:
                 official_hosts.append(value)
         official_hosts = list(dict.fromkeys(official_hosts))[:MAX_OFFICIAL_HOSTS]
-        mapped = _map_official(unresolved, official_discovery)
-        for state in unresolved:
-            for _, candidate in mapped.get(state.index, [])[:2]:
-                if _try_official(state, candidate.url, context):
-                    break
+
+        # Discovery results can themselves be exact job pages. Fetch only strong
+        # role candidates; pure careers landing pages remain host hints.
+        exactish = [result for result in official_discovery if _is_concrete_job_url(result.url)]
+        if exactish:
+            _fetch_ranked_official(unresolved, exactish, context, progress)
 
     unresolved = [state for state in states if not state.finished]
     if unresolved and official_hosts:
+        preferred_hosts = set(official_hosts)
         for role_batch in _chunks([(state.index, state.signal) for state in unresolved]):
             batch_states = [state for state in states if state.index in {index for index, _ in role_batch}]
             results: list[SearchResult] = []
@@ -470,36 +536,26 @@ def research_company_jobs(*, email: EmailMessage, source_key: str, company_items
                 query = f"site:{official_host} {_role_or_query(role_batch)} {_location(role_batch)}".strip()
                 _say(progress, f"    official batch search: {official_host} ({len(role_batch)} roles)")
                 results.extend(context.search(query))
-            mapped = _map_official(batch_states, results)
-            for state in batch_states:
-                for _, candidate in mapped.get(state.index, [])[:2]:
-                    if _try_official(state, candidate.url, context):
-                        break
+            _fetch_ranked_official(batch_states, results, context, progress, preferred_hosts=preferred_hosts)
 
         for state in [item for item in states if not item.finished]:
             for official_host in official_hosts:
                 query = f'site:{official_host} "{state.signal.role_title}" {state.signal.location or "Singapore"}'
                 _say(progress, f"    targeted official search: {state.signal.role_title}")
-                candidates = _map_official([state], context.search(query)).get(state.index, [])
-                for _, candidate in candidates[:2]:
-                    if _try_official(state, candidate.url, context):
-                        break
+                results = context.search(query)
+                _fetch_ranked_official([state], results, context, progress, preferred_hosts={official_host})
                 if state.finished:
                     break
 
-    unresolved = [state for state in states if not state.finished]
-    if unresolved and not official_hosts:
-        for role_batch in _chunks([(state.index, state.signal) for state in unresolved]):
-            query = f'"{company}" careers {_role_or_query(role_batch)} {_location(role_batch)}'.strip()
-            _say(progress, f"    official role batch search ({len(role_batch)} roles)")
-            results = context.search(query)
-            batch_states = [state for state in states if state.index in {index for index, _ in role_batch}]
-            mapped = _map_official(batch_states, results)
-            for state in batch_states:
-                for _, candidate in mapped.get(state.index, [])[:2]:
-                    if _try_official(state, candidate.url, context):
-                        break
+    # If discovery did not identify a host, do one exact-role public search per
+    # unresolved role. This is intentionally not blocked by URL-shape heuristics.
+    for state in [item for item in states if not item.finished and not official_hosts]:
+        query = f'"{company}" "{state.signal.role_title}" {state.signal.location or "Singapore"} careers job'
+        _say(progress, f"    targeted official search: {state.signal.role_title}")
+        results = context.search(query)
+        _fetch_ranked_official([state], results, context, progress)
 
+    # Strict secondary fallback: LinkedIn jobs only.
     for state in [item for item in states if not item.finished]:
         for url in _direct_secondary(state.signal)[:1]:
             if _try_secondary(state, url, context):
@@ -511,23 +567,12 @@ def research_company_jobs(*, email: EmailMessage, source_key: str, company_items
             query = f'site:linkedin.com/jobs "{company}" {_role_or_query(role_batch)} {_location(role_batch)}'.strip()
             _say(progress, f"    LinkedIn fallback batch ({len(role_batch)} roles)")
             results = context.search(query)
+            _say(progress, f"      LinkedIn search results={len(results)}")
             batch_states = [state for state in states if state.index in {index for index, _ in role_batch}]
-            mapped = _map_secondary(batch_states, results)
             for state in batch_states:
-                for _, candidate in mapped.get(state.index, [])[:2]:
-                    if _try_secondary(state, candidate.url, context):
-                        break
-
-    unresolved = [state for state in states if not state.finished]
-    if unresolved:
-        for role_batch in _chunks([(state.index, state.signal) for state in unresolved]):
-            query = f'"{company}" {_role_or_query(role_batch)} {_location(role_batch)} Indeed JobStreet Glassdoor jobs'.strip()
-            _say(progress, f"    broader secondary batch ({len(role_batch)} roles)")
-            results = context.search(query)
-            batch_states = [state for state in states if state.index in {index for index, _ in role_batch}]
-            mapped = _map_secondary(batch_states, results)
-            for state in batch_states:
-                for _, candidate in mapped.get(state.index, [])[:2]:
+                candidates = _rank_linkedin_candidates(state, results)
+                _say(progress, f"      {state.signal.role_title}: LinkedIn fetch candidates={min(len(candidates), MAX_LINKEDIN_FETCH_CANDIDATES)}")
+                for candidate in candidates[:MAX_LINKEDIN_FETCH_CANDIDATES]:
                     if _try_secondary(state, candidate.url, context):
                         break
 
@@ -538,36 +583,38 @@ def research_company_jobs(*, email: EmailMessage, source_key: str, company_items
             state.research_status = "source_verified"
             state.research_confidence = "medium"
             state.research_basis = "trusted_nus_email_web_unresolved"
-        records.append(JobRecord(
-            source_key=source_key,
-            source_message_id=email.message_id,
-            source_sender_email=email.sender_email,
-            source_subject=email.subject,
-            company=signal.company,
-            title=signal.role_title,
-            location=signal.location,
-            opportunity_type=signal.opportunity_type,
-            deadline_hint=signal.deadline_hint,
-            availability_status=state.availability_status,
-            target_major=signal.target_major,
-            target_degree_level=signal.target_degree_level,
-            source_urls=signal.urls,
-            record_kind="job_posting",
-            research_status=state.research_status,
-            research_confidence=state.research_confidence,
-            research_basis=state.research_basis,
-            primary_source_url=state.primary_url,
-            secondary_source_url=state.secondary_url,
-            official_job_url=state.primary_url,
-            application_url=state.application_url or state.primary_url or (signal.urls[0] if signal.urls else None),
-            jd_status=state.jd_status,
-            jd_source_url=state.jd_source_url,
-            jd_text=state.jd_text,
-            source_evidence=signal.raw_text,
-            evidence_summary=state.evidence_summary,
-            warnings=state.warnings,
-            errors=state.errors,
-        ))
+        records.append(
+            JobRecord(
+                source_key=source_key,
+                source_message_id=email.message_id,
+                source_sender_email=email.sender_email,
+                source_subject=email.subject,
+                company=signal.company,
+                title=signal.role_title,
+                location=signal.location,
+                opportunity_type=signal.opportunity_type,
+                deadline_hint=signal.deadline_hint,
+                availability_status=state.availability_status,
+                target_major=signal.target_major,
+                target_degree_level=signal.target_degree_level,
+                source_urls=signal.urls,
+                record_kind="job_posting",
+                research_status=state.research_status,
+                research_confidence=state.research_confidence,
+                research_basis=state.research_basis,
+                primary_source_url=state.primary_url,
+                secondary_source_url=state.secondary_url,
+                official_job_url=state.primary_url,
+                application_url=state.application_url or state.primary_url or (signal.urls[0] if signal.urls else None),
+                jd_status=state.jd_status,
+                jd_source_url=state.jd_source_url,
+                jd_text=state.jd_text,
+                source_evidence=signal.raw_text,
+                evidence_summary=state.evidence_summary,
+                warnings=state.warnings,
+                errors=state.errors,
+            )
+        )
 
     return CompanyResearchOutcome(
         job_records=records,

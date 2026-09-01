@@ -98,24 +98,12 @@ def _company_aliases(company: str | None) -> set[str]:
 
     all_tokens = re.findall(r"[a-z0-9]+", raw.lower())
     legal_stop = {
-        "the",
-        "pte",
-        "ltd",
-        "limited",
-        "inc",
-        "holdings",
-        "singapore",
-        "company",
-        "private",
-        "corporation",
-        "corp",
-        "solutions",
-        "branch",
+        "the", "pte", "ltd", "limited", "inc", "holdings", "singapore",
+        "company", "private", "corporation", "corp", "solutions", "branch",
     }
     tokens = [token for token in all_tokens if token not in legal_stop]
     aliases.update(token for token in tokens if len(token) >= 3)
 
-    # Preserve common brand acronyms such as BCG and EY.
     acronym_tokens = [token for token in tokens if token not in {"and", "of", "asia"}]
     acronym = "".join(token[0] for token in acronym_tokens if token)
     if len(acronym) >= 2:
@@ -127,14 +115,19 @@ def _company_aliases(company: str | None) -> set[str]:
     return aliases
 
 
-def _company_identity_matches_url(url: str | None, company: str | None) -> bool:
-    """Require the URL itself to carry the current employer identity.
+def _short_alias_matches_brand_host(alias: str, compact_host: str, host_tokens: set[str]) -> bool:
+    if alias in host_tokens:
+        return True
+    # Safe special case for branded career domains such as pgcareers.com. Do not
+    # apply this to shared ATS domains (handled separately below).
+    return (
+        len(alias) >= 2
+        and compact_host.startswith(alias)
+        and any(marker in compact_host for marker in ("career", "careers", "jobs", "recruit"))
+    )
 
-    Generic ATS domains are shared by thousands of employers.  Seeing Workday,
-    Greenhouse, Lever or Mokahr is therefore not enough to call a URL official.
-    The tenant/path/query must also identify the company (e.g. keppel.wd3..., or
-    mokahr.com/.../tesla/...).
-    """
+
+def _company_identity_matches_url(url: str | None, company: str | None) -> bool:
     if not url or not company:
         return False
     try:
@@ -142,16 +135,7 @@ def _company_identity_matches_url(url: str | None, company: str | None) -> bool:
     except ValueError:
         return False
 
-    raw = unquote(
-        " ".join(
-            [
-                parsed.netloc.lower(),
-                parsed.path.lower(),
-                parsed.query.lower(),
-                parsed.fragment.lower(),
-            ]
-        )
-    )
+    raw = unquote(" ".join([parsed.netloc.lower(), parsed.path.lower(), parsed.query.lower(), parsed.fragment.lower()]))
     compact = re.sub(r"[^a-z0-9]", "", raw)
     tokens = set(re.findall(r"[a-z0-9]+", raw))
 
@@ -172,9 +156,6 @@ def is_plausible_official_url(url: str | None, company: str | None) -> bool:
     if value in {"careers.example.com", "jobs.example.com"}:
         return True
 
-    # Shared ATS domains are only official when the tenant/path/query carries the
-    # current company identity. This prevents EY records from accepting Keppel's
-    # Workday URL simply because both use Workday.
     if any(marker in value for marker in ATS_HOST_MARKERS):
         return _company_identity_matches_url(url, company)
 
@@ -182,7 +163,7 @@ def is_plausible_official_url(url: str | None, company: str | None) -> bool:
     host_tokens = set(re.findall(r"[a-z0-9]+", value))
     for alias in _company_aliases(company):
         if len(alias) <= 3:
-            if alias in host_tokens:
+            if _short_alias_matches_brand_host(alias, compact_host, host_tokens):
                 return True
         elif alias in compact_host:
             return True
@@ -195,7 +176,6 @@ def page_is_closed(text: str) -> bool:
 
 
 def clean_jd_text(text: str) -> str:
-    """Keep job content while removing common LinkedIn/search-page chrome and recommendations."""
     if not text:
         return ""
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")

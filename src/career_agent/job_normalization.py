@@ -18,6 +18,9 @@ COMPANY_CANONICAL_ALIASES = {
     "ernstyoungsolutions": "ernst young",
     "bostonconsultinggroup": "boston consulting group",
     "thebostonconsultinggroup": "boston consulting group",
+    "point72": "point72",
+    "point72asia": "point72",
+    "point72asiasingapore": "point72",
 }
 LEGAL_SUFFIXES = {
     "pte", "ltd", "limited", "private", "inc", "corp", "corporation",

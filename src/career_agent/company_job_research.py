@@ -26,19 +26,9 @@ MAX_SEARCH_RESULTS = 10
 MAX_OFFICIAL_HOSTS = 2
 MIN_JD_CHARS = 500
 MIN_JD_TITLE_OVERLAP = 0.20
-MIN_OFFICIAL_RESULT_SCORE = 55.0
-MIN_SECONDARY_RESULT_SCORE = 35.0
+MIN_OFFICIAL_SCORE = 55.0
+MIN_SECONDARY_SCORE = 35.0
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
-JOB_URL_MARKERS = (
-    "/job/",
-    "/jobs/",
-    "/jobdetail",
-    "/job-detail",
-    "/position/",
-    "/positions/",
-    "/career/",
-    "/careers/",
-)
 APPLICATION_HOSTS = {
     "forms.office.com",
     "forms.microsoft.com",
@@ -102,49 +92,34 @@ def _company_aliases(company: str | None) -> set[str]:
         "corporation",
         "corp",
     }
-    raw_tokens = [
+    tokens = [
         token for token in TOKEN_PATTERN.findall(raw.lower()) if token not in legal_stop
     ]
-    aliases.update(token for token in raw_tokens if len(token) >= 3)
+    aliases.update(token for token in tokens if len(token) >= 3)
 
     acronym_tokens = [
-        token
-        for token in raw_tokens
-        if token not in {"and", "of", "asia", "holdings"}
+        token for token in tokens if token not in {"and", "of", "asia", "holdings"}
     ]
     acronym = "".join(token[0] for token in acronym_tokens if token)
     if len(acronym) >= 2:
         aliases.add(acronym)
 
-    compact = "".join(raw_tokens)
+    compact = "".join(tokens)
     if len(compact) >= 4:
         aliases.add(compact)
     return aliases
 
 
 def _company_match(company: str | None, text: str) -> bool:
-    compact_text = re.sub(r"[^a-z0-9]", "", text.lower())
     lowered = text.lower()
+    compact_text = re.sub(r"[^a-z0-9]", "", lowered)
     for alias in _company_aliases(company):
         if len(alias) <= 3:
             if re.search(rf"\b{re.escape(alias)}\b", lowered):
                 return True
-        elif alias in compact_text or alias in lowered:
+        elif alias in lowered or alias in compact_text:
             return True
     return False
-
-
-def _looks_job_like(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return False
-    path = parsed.path.lower()
-    query = parsed.query.lower()
-    return any(marker in path for marker in JOB_URL_MARKERS) or any(
-        marker in query
-        for marker in ("jobid=", "job_id=", "jobcode=", "requisitionid=", "reqid=")
-    )
 
 
 def _is_application_url(url: str) -> bool:
@@ -154,15 +129,46 @@ def _is_application_url(url: str) -> bool:
         return False
 
 
+def _is_concrete_job_url(url: str) -> bool:
+    """Concrete job detail, not a company careers/jobs landing page."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+
+    path = parsed.path.lower().rstrip("/")
+    query = parsed.query.lower()
+    fragment = parsed.fragment.lower()
+
+    if any(
+        marker in query
+        for marker in ("jobid=", "job_id=", "jobcode=", "requisitionid=", "reqid=")
+    ):
+        return True
+    if any(
+        marker in fragment
+        for marker in ("/job/", "/jobs/", "jobid=", "jobcode=")
+    ):
+        return True
+    if any(marker in path for marker in ("/job/", "/jobdetail", "/job-detail", "/position/")):
+        return True
+
+    # /jobs/<slug-or-id> is concrete, while /jobs is only a landing page.
+    jobs_index = path.find("/jobs/")
+    if jobs_index >= 0 and len(path[jobs_index + len("/jobs/") :].strip("/")) >= 2:
+        return True
+    return False
+
+
 def _result_text(result: SearchResult) -> str:
     return f"{result.title} {result.snippet} {result.url}"
 
 
-def _looks_official_result(signal: OpportunitySignal, result: SearchResult) -> bool:
-    if is_plausible_official_url(result.url, signal.company):
-        return True
+def _looks_official(signal: OpportunitySignal, result: SearchResult) -> bool:
     if is_aggregator_url(result.url) or _is_application_url(result.url):
         return False
+    if is_plausible_official_url(result.url, signal.company):
+        return True
 
     value = _result_text(result)
     if not _company_match(signal.company, value):
@@ -175,14 +181,14 @@ def _looks_official_result(signal: OpportunitySignal, result: SearchResult) -> b
         marker in f"{parsed.netloc.lower()} {parsed.path.lower()}"
         for marker in ("career", "jobs", "job", "recruit", "workday", "greenhouse", "lever")
     )
-    return careerish or _title_overlap(signal.role_title, value) >= 0.50
+    return careerish
 
 
 def _official_score(signal: OpportunitySignal, result: SearchResult) -> float:
     value = _result_text(result)
     score = 45.0
     score += 40.0 * _title_overlap(signal.role_title, value)
-    if _looks_job_like(result.url):
+    if _is_concrete_job_url(result.url):
         score += 10.0
     if _company_match(signal.company, value):
         score += 10.0
@@ -193,21 +199,22 @@ def _official_score(signal: OpportunitySignal, result: SearchResult) -> float:
 
 def _secondary_score(signal: OpportunitySignal, result: SearchResult) -> float:
     value = _result_text(result)
-    score = 15.0
-    score += 50.0 * _title_overlap(signal.role_title, value)
+    score = 15.0 + 50.0 * _title_overlap(signal.role_title, value)
     if _company_match(signal.company, value):
         score += 15.0
-    result_host = host(result.url)
-    if "linkedin.com" in result_host:
+    if "linkedin.com" in host(result.url):
         score += 10.0
     if signal.location and _normalize(signal.location) in _normalize(value):
         score += 5.0
     return min(100.0, score)
 
 
-def _page_company_title_match(page: FetchedPage, signal: OpportunitySignal) -> bool:
+def _page_matches(page: FetchedPage, signal: OpportunitySignal) -> bool:
     value = f"{page.title}\n{page.text}"
-    return _company_match(signal.company, value) and _title_overlap(signal.role_title, value) >= 0.15
+    return (
+        _title_overlap(signal.role_title, value) >= 0.15
+        and _company_match(signal.company, value)
+    )
 
 
 def _usable_jd(page: FetchedPage, signal: OpportunitySignal) -> tuple[str | None, str | None]:
@@ -227,13 +234,13 @@ def _chunks(values: list, size: int = ROLE_BATCH_SIZE):
 
 
 def _role_or_query(items: list[tuple[int, OpportunitySignal]]) -> str:
-    roles = [f'"{item.role_title}"' for _, item in items if item.role_title]
-    return " OR ".join(roles)
+    return " OR ".join(
+        f'"{signal.role_title}"' for _, signal in items if signal.role_title
+    )
 
 
-def _company_location(items: list[tuple[int, OpportunitySignal]]) -> str:
-    locations = [item.location for _, item in items if item.location]
-    return locations[0] if locations else "Singapore"
+def _location(items: list[tuple[int, OpportunitySignal]]) -> str:
+    return next((signal.location for _, signal in items if signal.location), "Singapore")
 
 
 @dataclass
@@ -259,8 +266,9 @@ class ResearchContext:
             results = search_public_web(query, max_results=MAX_SEARCH_RESULTS)
         except Exception as exc:
             self.search_cache[query] = []
-            warning = f"web search failed: {type(exc).__name__}: {exc} | query={query}"
-            self.warnings.append(warning)
+            self.warnings.append(
+                f"web search failed: {type(exc).__name__}: {exc} | query={query}"
+            )
             if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {401, 403, 429}:
                 self.search_disabled_reason = (
                     f"public search disabled for this run after HTTP {exc.response.status_code}"
@@ -284,7 +292,9 @@ class ResearchContext:
         except Exception as exc:
             self.page_cache[url] = None
             self.page_errors[url] = f"{type(exc).__name__}: {exc}"
-            self.warnings.append(f"page fetch failed: {url}: {type(exc).__name__}: {exc}")
+            self.warnings.append(
+                f"page fetch failed: {url}: {type(exc).__name__}: {exc}"
+            )
             return None
         self.page_cache[url] = page
         return page
@@ -310,7 +320,10 @@ class RoleState:
 
     @property
     def finished(self) -> bool:
-        return self.jd_status in {"fetched_official", "fetched_secondary"} or self.availability_status == "closed_by_official"
+        return (
+            self.jd_status in {"fetched_official", "fetched_secondary"}
+            or self.availability_status == "closed_by_official"
+        )
 
 
 @dataclass
@@ -322,15 +335,27 @@ class CompanyResearchOutcome:
     errors: list[str]
 
 
-def _direct_official_urls(signal: OpportunitySignal) -> list[str]:
+def _direct_official_hosts(signal: OpportunitySignal) -> list[str]:
+    values: list[str] = []
+    for url in signal.urls:
+        if is_plausible_official_url(url, signal.company) and not _is_application_url(url):
+            value = host(url)
+            if value:
+                values.append(value)
+    return list(dict.fromkeys(values))
+
+
+def _direct_official_jobs(signal: OpportunitySignal) -> list[str]:
     return [
         url
         for url in signal.urls
-        if is_plausible_official_url(url, signal.company) and not _is_application_url(url)
+        if is_plausible_official_url(url, signal.company)
+        and not _is_application_url(url)
+        and _is_concrete_job_url(url)
     ]
 
 
-def _direct_secondary_urls(signal: OpportunitySignal) -> list[str]:
+def _direct_secondary(signal: OpportunitySignal) -> list[str]:
     return [url for url in signal.urls if is_secondary_url(url)]
 
 
@@ -338,7 +363,7 @@ def _application_url(signal: OpportunitySignal) -> str | None:
     return next((url for url in signal.urls if _is_application_url(url)), None)
 
 
-def _accept_official_url(
+def _try_official(
     state: RoleState,
     url: str,
     context: ResearchContext,
@@ -347,23 +372,30 @@ def _accept_official_url(
 ) -> bool:
     if state.finished:
         return True
-    state.primary_url = state.primary_url or url
+    if not _is_concrete_job_url(url):
+        return False
+
+    # A concrete official URL is useful provenance even when its page is a JS shell.
+    # A later secondary source may supply the readable JD while primary remains official.
+    state.primary_url = url
     page = context.fetch(url)
     if page is None:
         return False
 
     if page_is_closed(page.text):
-        if direct or _page_company_title_match(page, state.signal):
+        if direct or _page_matches(page, state.signal):
             state.availability_status = "closed_by_official"
             state.research_status = "verified_exact_job"
             state.research_confidence = "high"
             state.research_basis = "official_page_closed"
-            state.evidence_summary.append("official employer/ATS page says the role is closed")
+            state.evidence_summary.append(
+                "official employer/ATS page says the role is closed"
+            )
             return True
         return False
 
     cleaned, reason = _usable_jd(page, state.signal)
-    if cleaned and (direct or _page_company_title_match(page, state.signal)):
+    if cleaned and (direct or _page_matches(page, state.signal)):
         state.primary_url = page.final_url or url
         state.jd_status = "fetched_official"
         state.jd_source_url = page.final_url or url
@@ -371,27 +403,25 @@ def _accept_official_url(
         state.research_status = "verified_exact_job"
         state.research_confidence = "high"
         state.research_basis = "official_company_or_ats_page"
-        state.evidence_summary.append("official employer/ATS page matched the circulated role")
+        state.evidence_summary.append(
+            "official employer/ATS page matched the circulated role"
+        )
         return True
 
-    if reason:
-        state.warnings.append(f"official candidate did not yield usable JD: {url}: {reason}")
+    state.warnings.append(
+        f"official candidate did not yield usable JD: {url}: {reason or 'unverified'}"
+    )
     return False
 
 
-def _accept_secondary_url(
-    state: RoleState,
-    url: str,
-    context: ResearchContext,
-) -> bool:
+def _try_secondary(state: RoleState, url: str, context: ResearchContext) -> bool:
     if state.finished:
         return True
-    state.secondary_url = state.secondary_url or url
     page = context.fetch(url)
     if page is None:
         return False
     cleaned, reason = _usable_jd(page, state.signal)
-    if cleaned:
+    if cleaned and _page_matches(page, state.signal):
         state.secondary_url = page.final_url or url
         state.jd_status = "fetched_secondary"
         state.jd_source_url = page.final_url or url
@@ -403,43 +433,42 @@ def _accept_secondary_url(
             if state.primary_url
             else "secondary_same_job_evidence"
         )
-        state.evidence_summary.append("secondary public job page matched the circulated role and supplied the JD")
+        state.evidence_summary.append(
+            "secondary public job page matched the circulated role and supplied the JD"
+        )
         return True
-    if reason:
-        state.warnings.append(f"secondary candidate did not yield usable JD: {url}: {reason}")
+    state.warnings.append(
+        f"secondary candidate did not yield usable JD: {url}: {reason or 'unverified'}"
+    )
     return False
 
 
-def _collect_official_hosts(states: list[RoleState]) -> list[str]:
-    hosts: list[str] = []
-    for state in states:
-        for url in _direct_official_urls(state.signal):
-            value = host(url)
-            if value:
-                hosts.append(value)
-        if state.primary_url:
-            value = host(state.primary_url)
-            if value:
-                hosts.append(value)
-    return list(dict.fromkeys(hosts))[:MAX_OFFICIAL_HOSTS]
-
-
-def _map_official_results(states: list[RoleState], results: list[SearchResult]) -> dict[int, list[tuple[float, SearchResult]]]:
-    mapped: dict[int, list[tuple[float, SearchResult]]] = {state.index: [] for state in states}
+def _map_official(
+    states: list[RoleState],
+    results: list[SearchResult],
+) -> dict[int, list[tuple[float, SearchResult]]]:
+    mapped = {state.index: [] for state in states}
     for result in results:
+        # Crucial distinction: a careers/jobs homepage may discover a host, but it
+        # can never be assigned to an individual role as its primary job URL.
+        if not _is_concrete_job_url(result.url):
+            continue
         for state in states:
-            if state.finished or not _looks_official_result(state.signal, result):
+            if state.finished or not _looks_official(state.signal, result):
                 continue
             score = _official_score(state.signal, result)
-            if score >= MIN_OFFICIAL_RESULT_SCORE:
+            if score >= MIN_OFFICIAL_SCORE:
                 mapped[state.index].append((score, result))
     for values in mapped.values():
         values.sort(key=lambda item: item[0], reverse=True)
     return mapped
 
 
-def _map_secondary_results(states: list[RoleState], results: list[SearchResult]) -> dict[int, list[tuple[float, SearchResult]]]:
-    mapped: dict[int, list[tuple[float, SearchResult]]] = {state.index: [] for state in states}
+def _map_secondary(
+    states: list[RoleState],
+    results: list[SearchResult],
+) -> dict[int, list[tuple[float, SearchResult]]]:
+    mapped = {state.index: [] for state in states}
     for result in results:
         if not is_secondary_url(result.url):
             continue
@@ -447,7 +476,7 @@ def _map_secondary_results(states: list[RoleState], results: list[SearchResult])
             if state.finished:
                 continue
             score = _secondary_score(state.signal, result)
-            if score >= MIN_SECONDARY_RESULT_SCORE:
+            if score >= MIN_SECONDARY_SCORE:
                 mapped[state.index].append((score, result))
     for values in mapped.values():
         values.sort(key=lambda item: item[0], reverse=True)
@@ -477,33 +506,37 @@ def research_company_jobs(
         )
         for index, signal in company_items
     ]
-    company = next((state.signal.company for state in states if state.signal.company), "<unknown>")
+    company = next(
+        (state.signal.company for state in states if state.signal.company),
+        "<unknown>",
+    )
     _say(progress, f"  official-first research: {company} ({len(states)} role(s))")
 
-    # Phase 0: source-provided official/ATS URLs. These cost zero searches and
-    # establish reusable company hosts for every role in the same company.
+    # Phase 0: use source-provided official/ATS concrete links with zero search.
+    official_hosts: list[str] = []
     for state in states:
-        direct_official = _direct_official_urls(state.signal)
-        if direct_official:
+        official_hosts.extend(_direct_official_hosts(state.signal))
+        direct_jobs = _direct_official_jobs(state.signal)
+        if direct_jobs:
             _say(progress, f"    direct official/ATS: {state.signal.role_title}")
-        for url in direct_official[:2]:
-            if _accept_official_url(state, url, context, direct=True):
+        for url in direct_jobs[:2]:
+            if _try_official(state, url, context, direct=True):
                 break
+    official_hosts = list(dict.fromkeys(official_hosts))[:MAX_OFFICIAL_HOSTS]
 
-    official_hosts = _collect_official_hosts(states)
     unresolved = [state for state in states if not state.finished]
 
-    # Phase 1: discover the employer/ATS host once per company when the source did
-    # not already provide one. This is company-level work, not per-job work.
+    # Phase 1: one company-level search discovers the official employer/ATS host.
+    # Generic careers landing pages are host evidence only and are never fetched or
+    # written into JobRecord.primary_source_url.
     if unresolved and not official_hosts and not context.search_disabled_reason:
-        location = _company_location(company_items)
-        query = f'"{company}" careers jobs {location}'.strip()
+        query = f'"{company}" careers jobs {_location(company_items)}'.strip()
         _say(progress, f"    discover official host: {query}")
         discovery = context.search(query)
         official_discovery = [
             result
             for result in discovery
-            if any(_looks_official_result(state.signal, result) for state in unresolved)
+            if any(_looks_official(state.signal, result) for state in unresolved)
         ]
         for result in official_discovery:
             value = host(result.url)
@@ -511,100 +544,128 @@ def research_company_jobs(
                 official_hosts.append(value)
         official_hosts = list(dict.fromkeys(official_hosts))[:MAX_OFFICIAL_HOSTS]
 
-        # A company-discovery query can already return concrete job pages, so map
-        # those results before spending site-specific searches.
-        mapped = _map_official_results(unresolved, official_discovery)
+        # The discovery query may incidentally return an exact job detail. Only
+        # concrete job URLs are mapped to roles; landing pages remain host-only.
+        mapped = _map_official(unresolved, official_discovery)
         for state in unresolved:
             candidates = mapped.get(state.index, [])
             if candidates:
-                _accept_official_url(state, candidates[0][1].url, context)
+                _try_official(state, candidates[0][1].url, context)
 
     unresolved = [state for state in states if not state.finished]
 
-    # Phase 2: search known official hosts in role batches. One query can resolve
-    # several jobs from the same company. Only roles still unresolved after the
-    # batch receive a targeted one-role site query.
+    # Phase 2: known official hosts are searched in role batches. A single query can
+    # resolve several same-company roles. Only still-unresolved roles get a targeted
+    # site query afterwards.
     if unresolved and official_hosts and not context.search_disabled_reason:
         for role_batch in _chunks([(state.index, state.signal) for state in unresolved]):
-            role_query = _role_or_query(role_batch)
-            location = _company_location(role_batch)
-            batch_states = [state for state in states if state.index in {i for i, _ in role_batch}]
-            batch_results: list[SearchResult] = []
+            batch_states = [
+                state
+                for state in states
+                if state.index in {index for index, _ in role_batch}
+            ]
+            results: list[SearchResult] = []
             for official_host in official_hosts:
-                query = f"site:{official_host} {role_query} {location}".strip()
-                _say(progress, f"    official batch search: {official_host} ({len(role_batch)} roles)")
-                batch_results.extend(context.search(query))
-            mapped = _map_official_results(batch_states, batch_results)
+                query = (
+                    f"site:{official_host} {_role_or_query(role_batch)} "
+                    f"{_location(role_batch)}"
+                ).strip()
+                _say(
+                    progress,
+                    f"    official batch search: {official_host} ({len(role_batch)} roles)",
+                )
+                results.extend(context.search(query))
+            mapped = _map_official(batch_states, results)
             for state in batch_states:
                 candidates = mapped.get(state.index, [])
                 if candidates:
-                    _accept_official_url(state, candidates[0][1].url, context)
+                    _try_official(state, candidates[0][1].url, context)
 
         for state in [item for item in states if not item.finished]:
             for official_host in official_hosts:
-                query = f'site:{official_host} "{state.signal.role_title}" {state.signal.location or "Singapore"}'
+                query = (
+                    f'site:{official_host} "{state.signal.role_title}" '
+                    f'{state.signal.location or "Singapore"}'
+                )
                 _say(progress, f"    targeted official search: {state.signal.role_title}")
-                results = context.search(query)
-                mapped = _map_official_results([state], results)
+                mapped = _map_official([state], context.search(query))
                 candidates = mapped.get(state.index, [])
-                if candidates and _accept_official_url(state, candidates[0][1].url, context):
+                if candidates and _try_official(
+                    state,
+                    candidates[0][1].url,
+                    context,
+                ):
                     break
 
-    # If host discovery failed, do one company+role batch search rather than the
-    # old exact+broad+fallback sequence for every individual job.
+    # If host discovery returned nothing, do one company+role batch search rather
+    # than restarting exact+broad research for every job.
     unresolved = [state for state in states if not state.finished]
     if unresolved and not official_hosts and not context.search_disabled_reason:
         for role_batch in _chunks([(state.index, state.signal) for state in unresolved]):
-            role_query = _role_or_query(role_batch)
-            location = _company_location(role_batch)
-            query = f'"{company}" careers {role_query} {location}'.strip()
+            query = (
+                f'"{company}" careers {_role_or_query(role_batch)} '
+                f'{_location(role_batch)}'
+            ).strip()
             _say(progress, f"    official role batch search ({len(role_batch)} roles)")
             results = context.search(query)
-            batch_states = [state for state in states if state.index in {i for i, _ in role_batch}]
-            mapped = _map_official_results(batch_states, results)
+            batch_states = [
+                state
+                for state in states
+                if state.index in {index for index, _ in role_batch}
+            ]
+            mapped = _map_official(batch_states, results)
             for state in batch_states:
                 candidates = mapped.get(state.index, [])
                 if candidates:
-                    _accept_official_url(state, candidates[0][1].url, context)
+                    _try_official(state, candidates[0][1].url, context)
 
-    # Phase 3: secondary sources only for roles official research did not complete.
-    # Direct secondary links are tried first, then LinkedIn in company batches,
-    # then one broader secondary batch for the remaining roles.
-    unresolved = [state for state in states if not state.finished]
-    for state in unresolved:
-        for url in _direct_secondary_urls(state.signal)[:1]:
-            if _accept_secondary_url(state, url, context):
+    # Phase 3: secondary evidence is allowed only for roles not completed by the
+    # official phase. Source-provided secondary links come first, then LinkedIn,
+    # then a broader Indeed/JobStreet/Glassdoor batch.
+    for state in [item for item in states if not item.finished]:
+        for url in _direct_secondary(state.signal)[:1]:
+            if _try_secondary(state, url, context):
                 break
 
     unresolved = [state for state in states if not state.finished]
     if unresolved and not context.search_disabled_reason:
         for role_batch in _chunks([(state.index, state.signal) for state in unresolved]):
-            role_query = _role_or_query(role_batch)
-            location = _company_location(role_batch)
-            query = f'site:linkedin.com/jobs "{company}" {role_query} {location}'.strip()
+            query = (
+                f'site:linkedin.com/jobs "{company}" {_role_or_query(role_batch)} '
+                f'{_location(role_batch)}'
+            ).strip()
             _say(progress, f"    LinkedIn fallback batch ({len(role_batch)} roles)")
             results = context.search(query)
-            batch_states = [state for state in states if state.index in {i for i, _ in role_batch}]
-            mapped = _map_secondary_results(batch_states, results)
+            batch_states = [
+                state
+                for state in states
+                if state.index in {index for index, _ in role_batch}
+            ]
+            mapped = _map_secondary(batch_states, results)
             for state in batch_states:
                 candidates = mapped.get(state.index, [])
                 if candidates:
-                    _accept_secondary_url(state, candidates[0][1].url, context)
+                    _try_secondary(state, candidates[0][1].url, context)
 
     unresolved = [state for state in states if not state.finished]
     if unresolved and not context.search_disabled_reason:
         for role_batch in _chunks([(state.index, state.signal) for state in unresolved]):
-            role_query = _role_or_query(role_batch)
-            location = _company_location(role_batch)
-            query = f'"{company}" {role_query} {location} Indeed JobStreet Glassdoor jobs'.strip()
+            query = (
+                f'"{company}" {_role_or_query(role_batch)} {_location(role_batch)} '
+                "Indeed JobStreet Glassdoor jobs"
+            ).strip()
             _say(progress, f"    broader secondary batch ({len(role_batch)} roles)")
             results = context.search(query)
-            batch_states = [state for state in states if state.index in {i for i, _ in role_batch}]
-            mapped = _map_secondary_results(batch_states, results)
+            batch_states = [
+                state
+                for state in states
+                if state.index in {index for index, _ in role_batch}
+            ]
+            mapped = _map_secondary(batch_states, results)
             for state in batch_states:
                 candidates = mapped.get(state.index, [])
                 if candidates:
-                    _accept_secondary_url(state, candidates[0][1].url, context)
+                    _try_secondary(state, candidates[0][1].url, context)
 
     records: list[JobRecord] = []
     for state in states:
@@ -613,6 +674,7 @@ def research_company_jobs(
             state.research_status = "source_verified"
             state.research_confidence = "medium"
             state.research_basis = "trusted_nus_email_web_unresolved"
+
         records.append(
             JobRecord(
                 source_key=source_key,

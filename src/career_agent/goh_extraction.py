@@ -5,6 +5,7 @@ from datetime import datetime
 
 from career_agent.all_job_extraction import ExtractionMetrics, extract_all_opportunities
 from career_agent.batch_sources import SOURCE_DOCUMENT_SEPARATOR, TABLE_END, TABLE_START
+from career_agent.extraction_snapshot import load_or_bootstrap_snapshot, save_snapshot
 from career_agent.models.signal import OpportunitySignal
 from career_agent.nodes.normalize_email import extract_links_from_text
 
@@ -216,7 +217,7 @@ def extract_goh_opportunities(
     corpus: str,
     base_extractor=extract_all_opportunities,
 ) -> tuple[list[OpportunitySignal], ExtractionMetrics, list[str]]:
-    """Deterministic Goh tables first; LLM is optional non-table enrichment only."""
+    """Deterministic Goh tables first; stable snapshot before optional LLM."""
     robust = _structured_signals(
         source_name=source_name,
         source_message_id=source_message_id,
@@ -229,10 +230,16 @@ def extract_goh_opportunities(
     errors: list[str] = []
     metrics = ExtractionMetrics(llm_calls=0, source_chars=len(llm_corpus))
 
-    # When there is no deterministic table evidence at all, preserve the old
-    # natural-language extraction path even for very short messages. The residue
-    # threshold is only an optimization for emails already covered by tables.
-    should_run_base = not robust or _has_meaningful_non_table_content(llm_corpus)
+    use_snapshot = base_extractor is extract_all_opportunities
+    if use_snapshot:
+        base = load_or_bootstrap_snapshot(
+            source_key="goh_ze_li",
+            source_message_id=source_message_id,
+            source_name=source_name,
+            source_date=source_date,
+        )
+
+    should_run_base = not base and (not robust or _has_meaningful_non_table_content(llm_corpus))
     if should_run_base:
         try:
             base, metrics, errors = base_extractor(
@@ -273,4 +280,7 @@ def extract_goh_opportunities(
             }
         )
 
-    return list(merged.values()), metrics, errors
+    result = list(merged.values())
+    if use_snapshot and result:
+        save_snapshot("goh_ze_li", source_message_id, result)
+    return result, metrics, errors

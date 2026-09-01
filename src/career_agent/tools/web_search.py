@@ -15,10 +15,10 @@ class SearchResult:
     snippet: str
 
 
+BING_URL = "https://www.bing.com/search"
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 DUCKDUCKGO_LITE_URL = "https://lite.duckduckgo.com/lite/"
 SEARCH_TIMEOUT_SECONDS = 6.0
-FAIL_FAST_HTTP_STATUSES = {401, 403, 429}
 
 
 def _unwrap_duckduckgo_url(href: str) -> str:
@@ -54,6 +54,27 @@ def _append_result(
             snippet=" ".join(snippet.split()),
         )
     )
+
+
+def _parse_bing_results(html: str, max_results: int) -> list[SearchResult]:
+    soup = BeautifulSoup(html, "html.parser")
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+    for item in soup.select("li.b_algo"):
+        anchor = item.select_one("h2 a")
+        if not anchor:
+            continue
+        snippet_node = item.select_one(".b_caption p")
+        _append_result(
+            results,
+            seen,
+            title=anchor.get_text(" ", strip=True),
+            href=anchor.get("href", ""),
+            snippet=(snippet_node.get_text(" ", strip=True) if snippet_node else ""),
+        )
+        if len(results) >= max_results:
+            break
+    return results
 
 
 def _parse_html_results(html: str, max_results: int) -> list[SearchResult]:
@@ -130,62 +151,54 @@ def _request_search(
     return parser(response.text, max_results)
 
 
-def _is_fail_fast_http_error(exc: Exception) -> bool:
-    return (
-        isinstance(exc, httpx.HTTPStatusError)
-        and exc.response.status_code in FAIL_FAST_HTTP_STATUSES
-    )
-
-
 def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
-    """Bounded public search suitable for bulk prototype research.
+    """Best-effort public search with provider isolation.
 
-    A query may still be relaxed when the HTML endpoint genuinely returns zero
-    results, but an HTTP-level block (401/403/429) is endpoint-wide rather than
-    query-specific, so do not waste another identical request with different
-    punctuation. We then try Lite once. This keeps one logical search bounded to
-    at most two blocked/timed-out requests instead of three 12-second waits.
+    Search order is Bing -> DuckDuckGo HTML -> DuckDuckGo Lite. A 403/429 from
+    one provider is local to that provider/query; it never disables subsequent
+    jobs or later LinkedIn fallback searches in the same catalog run.
     """
     if not query.strip():
         return []
 
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; SimplyNextCareerAgent/0.1)"}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-SG,en;q=0.9",
+    }
     variants = [query.strip()]
     simplified = _simplify_query(query)
     if simplified and simplified != variants[0]:
         variants.append(simplified)
 
-    last_error: Exception | None = None
-    for variant in variants:
-        try:
-            results = _request_search(
-                DUCKDUCKGO_HTML_URL,
-                variant,
-                parser=_parse_html_results,
-                max_results=max_results,
-                headers=headers,
-            )
-            if results:
-                return results
-        except Exception as exc:
-            last_error = exc
-            if _is_fail_fast_http_error(exc):
+    providers = (
+        (BING_URL, _parse_bing_results),
+        (DUCKDUCKGO_HTML_URL, _parse_html_results),
+        (DUCKDUCKGO_LITE_URL, _parse_lite_results),
+    )
+    errors: list[Exception] = []
+
+    for url, parser in providers:
+        for variant in variants:
+            try:
+                results = _request_search(
+                    url,
+                    variant,
+                    parser=parser,
+                    max_results=max_results,
+                    headers=headers,
+                )
+                if results:
+                    return results
+            except Exception as exc:
+                # Provider blocks and transient errors are isolated here. Continue
+                # to the next provider rather than poisoning the whole research run.
+                errors.append(exc)
                 break
 
-    lite_query = variants[-1]
-    try:
-        results = _request_search(
-            DUCKDUCKGO_LITE_URL,
-            lite_query,
-            parser=_parse_lite_results,
-            max_results=max_results,
-            headers=headers,
-        )
-        if results:
-            return results
-    except Exception as exc:
-        last_error = exc
-
-    if last_error is not None:
-        raise last_error
+    # A complete provider failure is equivalent to no results for this query.
+    # Callers can continue to research later companies/roles and alternate sources.
     return []

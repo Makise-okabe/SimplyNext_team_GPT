@@ -136,9 +136,8 @@ def _structured_signals(
             if not company or not role_cell:
                 continue
 
-            # Structured Goh rows are authoritative for source URLs.  Only URLs
+            # Structured Goh rows are authoritative for source URLs. Only URLs
             # physically present in this exact row may be attached to its roles.
-            # Never inherit an LLM/global-corpus guessed URL from another row.
             row_urls = list(dict.fromkeys(extract_links_from_text(" | ".join(cells))))
             for role in _split_numbered_roles(role_cell):
                 if not role or role.lower().startswith("role"):
@@ -162,6 +161,55 @@ def _structured_signals(
     return signals
 
 
+def _strip_structured_email_tables(corpus: str) -> str:
+    """Remove Goh HTML-table bodies before optional LLM extraction.
+
+    The deterministic parser owns these rows. Passing the same rows to the LLM
+    creates duplicates, cross-row URL guesses, extra cost and a hard dependency
+    on Groq before the reliable parser can run.
+    """
+    documents: list[str] = []
+    for document in corpus.split(SOURCE_DOCUMENT_SEPARATOR):
+        if not document.strip().startswith("SOURCE: EMAIL\n"):
+            documents.append(document.strip())
+            continue
+
+        kept: list[str] = []
+        in_table = False
+        for raw_line in document.splitlines():
+            line = raw_line.strip()
+            if line == TABLE_START:
+                in_table = True
+                continue
+            if line == TABLE_END:
+                in_table = False
+                continue
+            if not in_table:
+                kept.append(raw_line)
+        documents.append("\n".join(kept).strip())
+
+    return f"\n{SOURCE_DOCUMENT_SEPARATOR}\n".join(
+        document for document in documents if document
+    )
+
+
+def _has_meaningful_non_table_content(corpus: str) -> bool:
+    """Avoid an LLM call for corpus residue that is only source labels/headings."""
+    lines: list[str] = []
+    ignored = {"jobs", "internships", "events"}
+    for raw_line in corpus.splitlines():
+        line = " ".join(raw_line.split()).strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered.startswith("source:") or lowered in ignored:
+            continue
+        if line == SOURCE_DOCUMENT_SEPARATOR:
+            continue
+        lines.append(line)
+    return len(" ".join(lines)) >= 80
+
+
 def _key(signal: OpportunitySignal) -> tuple[str, str]:
     return (
         " ".join((signal.company or "").lower().split()),
@@ -177,13 +225,7 @@ def extract_goh_opportunities(
     corpus: str,
     base_extractor=extract_all_opportunities,
 ) -> tuple[list[OpportunitySignal], ExtractionMetrics, list[str]]:
-    """Keep non-table extraction, but make deterministic Goh rows authoritative."""
-    base, metrics, errors = base_extractor(
-        source_name=source_name,
-        source_message_id=source_message_id,
-        source_date=source_date,
-        corpus=corpus,
-    )
+    """Deterministic Goh tables first; LLM is optional non-table enrichment only."""
     robust = _structured_signals(
         source_name=source_name,
         source_message_id=source_message_id,
@@ -191,12 +233,29 @@ def extract_goh_opportunities(
         corpus=corpus,
     )
 
+    llm_corpus = _strip_structured_email_tables(corpus)
+    base: list[OpportunitySignal] = []
+    errors: list[str] = []
+    metrics = ExtractionMetrics(llm_calls=0, source_chars=len(llm_corpus))
+
+    if _has_meaningful_non_table_content(llm_corpus):
+        try:
+            base, metrics, errors = base_extractor(
+                source_name=source_name,
+                source_message_id=source_message_id,
+                source_date=source_date,
+                corpus=llm_corpus,
+            )
+        except Exception as exc:
+            # Structured rows remain usable even when optional LLM enrichment is
+            # unavailable. Never fail the whole Track B pipeline on Groq here.
+            base = []
+            metrics = ExtractionMetrics(llm_calls=0, source_chars=len(llm_corpus))
+            errors = [f"optional Goh non-table extraction failed: {type(exc).__name__}: {exc}"]
+
     robust_keys = {_key(signal) for signal in robust}
     merged: dict[tuple[str, str], OpportunitySignal] = {}
 
-    # Base extraction is still useful for natural-language opportunities outside
-    # the table. For roles that also exist in the deterministic table, however,
-    # do not import base URLs because those may have been reattached globally.
     for signal in base:
         if len(_split_numbered_roles(signal.role_title or "")) > 1:
             continue
@@ -216,8 +275,6 @@ def extract_goh_opportunities(
                 "deadline_hint": signal.deadline_hint or previous.deadline_hint,
                 "location": signal.location or previous.location,
                 "opportunity_type": signal.opportunity_type,
-                # Row-local deterministic URLs replace, rather than merge with,
-                # any globally guessed URLs from the base extractor.
                 "urls": signal.urls,
                 "raw_text": signal.raw_text or previous.raw_text,
             }

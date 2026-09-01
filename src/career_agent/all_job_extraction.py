@@ -4,7 +4,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import unquote
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
@@ -202,29 +202,36 @@ def _table_signals(
     signals: list[OpportunitySignal] = []
     section = ""
     in_table = False
+    last_company: str | None = None
+
     for raw_line in corpus.splitlines():
         line = raw_line.strip()
         normalized_section = re.sub(r"[^A-Z]", "", line.upper())
         if normalized_section == "JOBS":
             section = SECTION_JOBS
+            last_company = None
             continue
         if normalized_section == "INTERNSHIPS":
             section = SECTION_INTERNSHIPS
+            last_company = None
             continue
         if normalized_section == "EVENTS":
             section = SECTION_EVENTS
+            last_company = None
             continue
         if line == TABLE_START:
             in_table = True
+            last_company = None
             continue
         if line == TABLE_END:
             in_table = False
+            last_company = None
             continue
         if not in_table or section not in {SECTION_JOBS, SECTION_INTERNSHIPS}:
             continue
 
         cells = [_clean_cell(cell) for cell in raw_line.split("|")]
-        if len(cells) < 4:
+        if len(cells) < 3:
             continue
         joined = " | ".join(cells).lower()
         if "company" in joined and ("role" in joined or "tc id" in joined):
@@ -234,10 +241,23 @@ def _table_signals(
             company = _clean_company_cell(cells[1])
             role = _clean_cell(cells[2])
             remarks = " | ".join(cells[4:])
-        else:
+            if company:
+                last_company = company
+        elif len(cells) == 3 and last_company:
+            # HTML rowspan continuation: company/industry cells exist only on the
+            # first physical row, while following rows carry role | TC ID | remarks.
+            company = last_company
+            role = _clean_cell(cells[0])
+            remarks = cells[2]
+        elif len(cells) >= 4:
             company = _clean_company_cell(cells[0])
             role = _clean_cell(cells[1])
             remarks = " | ".join(cells[3:])
+            if company:
+                last_company = company
+        else:
+            continue
+
         if not company or not role:
             continue
 
@@ -267,6 +287,54 @@ def _table_signals(
             )
         )
     return signals
+
+
+def _strip_table_blocks(corpus: str) -> str:
+    """Remove structured HTML table blocks before optional LLM extraction."""
+    kept: list[str] = []
+    in_table = False
+    for raw_line in corpus.splitlines():
+        line = raw_line.strip()
+        if line == TABLE_START:
+            in_table = True
+            continue
+        if line == TABLE_END:
+            in_table = False
+            continue
+        if not in_table:
+            kept.append(raw_line)
+    return "\n".join(kept).strip()
+
+
+def _residual_needs_llm(text: str, *, table_signals_found: bool) -> bool:
+    lines: list[str] = []
+    ignored = {"jobs", "internships", "events"}
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.split()).strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered.startswith("source:") or lowered in ignored:
+            continue
+        if line == SOURCE_DOCUMENT_SEPARATOR:
+            continue
+        lines.append(line)
+
+    residual = " ".join(lines).strip()
+    if not residual:
+        return False
+    if not table_signals_found:
+        return True
+
+    # When deterministic job tables already cover the email, only ask the LLM to
+    # inspect residual prose that actually looks employment-related. Event/challenge
+    # blurbs should not create a gratuitous LLM call.
+    return bool(
+        re.search(
+            r"(?i)\b(job|jobs|role|roles|intern|internship|hiring|graduate|associate|engineer|analyst|developer|manager|programme|program)\b",
+            residual,
+        )
+    )
 
 
 def _item_value(item, key: str):
@@ -341,29 +409,48 @@ def _dedupe_signals(signals: list[OpportunitySignal]) -> list[OpportunitySignal]
 
 
 def _reattach_direct_urls(signals: list[OpportunitySignal], corpus: str) -> list[OpportunitySignal]:
-    all_urls = extract_links_from_text(corpus)
-    if not all_urls:
+    """Attach each loose direct URL only to its strongest company+role match."""
+    all_urls = list(dict.fromkeys(extract_links_from_text(corpus)))
+    if not all_urls or not signals:
         return signals
-    updated: list[OpportunitySignal] = []
-    for signal in signals:
-        if signal.urls:
-            updated.append(signal)
-            continue
-        role_tokens = set(URL_TOKEN_PATTERN.findall(_normalize(signal.role_title)))
-        company_tokens = set(URL_TOKEN_PATTERN.findall(_normalize(signal.company)))
-        matched: list[str] = []
-        for url in all_urls:
-            normalized_url = _normalize(unquote(url))
-            url_tokens = set(URL_TOKEN_PATTERN.findall(normalized_url))
-            if not role_tokens:
+
+    assignments: dict[int, list[str]] = {index: [] for index in range(len(signals))}
+    for url in all_urls:
+        normalized_url = _normalize(unquote(url))
+        url_tokens = set(URL_TOKEN_PATTERN.findall(normalized_url))
+        scored: list[tuple[float, int]] = []
+
+        for index, signal in enumerate(signals):
+            if signal.urls:
+                continue
+            role_tokens = set(URL_TOKEN_PATTERN.findall(_normalize(signal.role_title)))
+            company_tokens = set(URL_TOKEN_PATTERN.findall(_normalize(signal.company)))
+            if not role_tokens or not company_tokens:
+                continue
+            if not (company_tokens & url_tokens):
                 continue
             title_overlap = len(role_tokens & url_tokens) / max(1, len(role_tokens))
-            company_overlap = bool(company_tokens & url_tokens)
-            if title_overlap >= 0.5 and company_overlap:
-                matched.append(url)
-        if matched:
-            signal = signal.model_copy(update={"urls": list(dict.fromkeys(matched))})
-        updated.append(signal)
+            if title_overlap >= 0.5:
+                scored.append((title_overlap, index))
+
+        if not scored:
+            continue
+        scored.sort(reverse=True)
+        best_score, best_index = scored[0]
+        # If two different roles match an URL almost equally, leave it unattached
+        # rather than contaminating both records.
+        if len(scored) > 1 and abs(best_score - scored[1][0]) < 0.05:
+            continue
+        assignments[best_index].append(url)
+
+    updated: list[OpportunitySignal] = []
+    for index, signal in enumerate(signals):
+        if signal.urls or not assignments[index]:
+            updated.append(signal)
+            continue
+        updated.append(
+            signal.model_copy(update={"urls": list(dict.fromkeys(assignments[index]))})
+        )
     return updated
 
 
@@ -381,14 +468,16 @@ def extract_all_opportunities(
         corpus=corpus,
     )
 
+    llm_corpus = _strip_table_blocks(corpus) if table_signals else corpus
     llm_items: list = []
     llm_calls = 0
     errors: list[str] = []
-    for chunk in _chunks(corpus):
-        chunk_items, chunk_calls, chunk_errors = _invoke_with_adaptive_retry(chunk)
-        llm_calls += chunk_calls
-        llm_items.extend(chunk_items)
-        errors.extend(chunk_errors)
+    if _residual_needs_llm(llm_corpus, table_signals_found=bool(table_signals)):
+        for chunk in _chunks(llm_corpus):
+            chunk_items, chunk_calls, chunk_errors = _invoke_with_adaptive_retry(chunk)
+            llm_calls += chunk_calls
+            llm_items.extend(chunk_items)
+            errors.extend(chunk_errors)
 
     llm_signals = [
         signal

@@ -22,6 +22,8 @@ CHUNK_OVERLAP = 900
 MAX_LLM_CHUNKS = 24
 MAX_RETRY_SPLIT_DEPTH = 2
 MIN_RETRY_CHARS = 1400
+LLM_TIMEOUT_SECONDS = 15.0
+LLM_MAX_RETRIES = 1
 
 SECTION_JOBS = "jobs"
 SECTION_INTERNSHIPS = "internships"
@@ -100,6 +102,8 @@ def _build_llm():
     return ChatGroq(
         model="openai/gpt-oss-120b",
         temperature=0,
+        timeout=LLM_TIMEOUT_SECONDS,
+        max_retries=LLM_MAX_RETRIES,
     ).with_structured_output(ExtractedOpportunityBatch)
 
 
@@ -159,7 +163,6 @@ def _invoke_with_adaptive_retry(
 
 
 def _parse_date_hint(text: str):
-    # Supports 5 Dec 2025, 5th Dec 2025, 24th Dec 25, etc.
     patterns = (
         r"(?i)deadline\s*:\s*(\d{1,2})(?:st|nd|rd|th)?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(20\d{2})",
         r"(?i)deadline\s*:\s*(\d{1,2})(?:st|nd|rd|th)?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{2})",
@@ -189,255 +192,179 @@ def _location_from_remarks(text: str) -> str | None:
     return value or None
 
 
-def _looks_like_identifier(value: str) -> bool:
-    cleaned = re.sub(r"(?i)^TC\s*:\s*", "", _clean_cell(value))
-    cleaned = cleaned.replace(" ", "")
-    return bool(re.fullmatch(r"(?:\d{5,8}|NA|N/A)", cleaned, flags=re.IGNORECASE))
-
-
-def _row_fields(
-    cells: list[str],
-    *,
-    carried_company: str | None,
-) -> tuple[str | None, str | None, str] | None:
-    cells = [_clean_cell(cell) for cell in cells if _clean_cell(cell)]
-    if not cells:
-        return None
-    joined = " | ".join(cells)
-    lowered = joined.lower()
-    if "company" in lowered and ("role" in lowered or "event title" in lowered):
-        return None
-    if len(cells) >= 5 and _looks_like_identifier(cells[3]):
-        return _clean_company_cell(cells[1]), cells[2], " | ".join(cells[4:])
-    if len(cells) >= 4 and _looks_like_identifier(cells[2]):
-        return _clean_company_cell(cells[0]), cells[1], " | ".join(cells[3:])
-    if len(cells) >= 3 and _looks_like_identifier(cells[1]) and carried_company:
-        return carried_company, cells[0], " | ".join(cells[2:])
-    if len(cells) >= 4 and _looks_like_identifier(cells[2]) and carried_company:
-        return carried_company, cells[1], " | ".join(cells[3:])
-    return None
-
-
-def _table_row_signal(
+def _table_signals(
     *,
     source_name: str,
     source_message_id: str,
     source_date,
-    section: str,
-    cells: list[str],
-    carried_company: str | None = None,
-) -> tuple[OpportunitySignal | None, str | None]:
-    resolved = _row_fields(cells, carried_company=carried_company)
-    if resolved is None:
-        return None, carried_company
-    company, role, remarks = resolved
-    if not company or not role:
-        return None, carried_company
-    company = _clean_company_cell(company)
-    role = _clean_cell(role)
-    if company.lower() in {"company", "-", "—"} or role.lower().startswith("role"):
-        return None, carried_company
-    urls = extract_links_from_text(role)
-    role_without_urls = re.sub(r"<https?://[^>]+>", "", role).strip()
-    role_without_urls = re.sub(r"\s+", " ", role_without_urls)
-    if not role_without_urls:
-        return None, company
-    opportunity_type = "internship" if section == SECTION_INTERNSHIPS else "full_time"
-    if "intern" in role_without_urls.lower() or "internship" in remarks.lower():
-        opportunity_type = "internship"
-    raw_cells = [_clean_cell(cell) for cell in cells]
-    signal = OpportunitySignal(
+    corpus: str,
+) -> list[OpportunitySignal]:
+    signals: list[OpportunitySignal] = []
+    section = ""
+    in_table = False
+    for raw_line in corpus.splitlines():
+        line = raw_line.strip()
+        normalized_section = re.sub(r"[^A-Z]", "", line.upper())
+        if normalized_section == "JOBS":
+            section = SECTION_JOBS
+            continue
+        if normalized_section == "INTERNSHIPS":
+            section = SECTION_INTERNSHIPS
+            continue
+        if normalized_section == "EVENTS":
+            section = SECTION_EVENTS
+            continue
+        if line == TABLE_START:
+            in_table = True
+            continue
+        if line == TABLE_END:
+            in_table = False
+            continue
+        if not in_table or section not in {SECTION_JOBS, SECTION_INTERNSHIPS}:
+            continue
+
+        cells = [_clean_cell(cell) for cell in raw_line.split("|")]
+        if len(cells) < 4:
+            continue
+        joined = " | ".join(cells).lower()
+        if "company" in joined and ("role" in joined or "tc id" in joined):
+            continue
+
+        if len(cells) >= 5:
+            company = _clean_company_cell(cells[1])
+            role = _clean_cell(cells[2])
+            remarks = " | ".join(cells[4:])
+        else:
+            company = _clean_company_cell(cells[0])
+            role = _clean_cell(cells[1])
+            remarks = " | ".join(cells[3:])
+        if not company or not role:
+            continue
+
+        lowered_role = role.lower()
+        lowered_remarks = remarks.lower()
+        if "intern" in lowered_role or "internship" in lowered_remarks:
+            opportunity_type = "internship"
+        elif "full time job" in lowered_remarks or "full-time job" in lowered_remarks:
+            opportunity_type = "full_time"
+        else:
+            opportunity_type = "internship" if section == SECTION_INTERNSHIPS else "full_time"
+
+        signals.append(
+            OpportunitySignal(
+                source_type="outlook",
+                source_name=source_name,
+                source_message_id=source_message_id,
+                source_date=source_date,
+                company=company,
+                role_title=role,
+                location=_location_from_remarks(remarks),
+                opportunity_type=opportunity_type,
+                deadline_hint=_parse_date_hint(remarks),
+                urls=list(dict.fromkeys(extract_links_from_text(" | ".join(cells)))),
+                raw_text=" | ".join(cells),
+                resolution_status="unresolved",
+            )
+        )
+    return signals
+
+
+def _item_value(item, key: str):
+    if isinstance(item, dict):
+        return item.get(key)
+    return getattr(item, key, None)
+
+
+def _from_llm_item(
+    item,
+    *,
+    source_name: str,
+    source_message_id: str,
+    source_date,
+) -> OpportunitySignal | None:
+    company = _clean_cell(str(_item_value(item, "company") or ""))
+    role_title = _clean_cell(str(_item_value(item, "role_title") or ""))
+    if not company or not role_title:
+        return None
+    opportunity_type = _item_value(item, "opportunity_type") or "unknown"
+    if opportunity_type not in {"internship", "full_time", "unknown"}:
+        opportunity_type = "unknown"
+    urls = _item_value(item, "urls") or []
+    evidence = _item_value(item, "evidence_text") or f"{company} | {role_title}"
+    deadline_hint = _parse_date_hint(str(evidence))
+    location = _item_value(item, "location") or None
+    target_major = list(_item_value(item, "target_major") or [])
+    target_degree_level = list(_item_value(item, "target_degree_level") or [])
+    return OpportunitySignal(
         source_type="outlook",
         source_name=source_name,
         source_message_id=source_message_id,
         source_date=source_date,
         company=company,
-        role_title=role_without_urls,
-        location=_location_from_remarks(remarks),
+        role_title=role_title,
+        location=location,
         opportunity_type=opportunity_type,
-        deadline_hint=_parse_date_hint(remarks),
-        urls=urls,
-        raw_text=" | ".join(raw_cells),
+        deadline_hint=deadline_hint,
+        target_major=target_major,
+        target_degree_level=target_degree_level,
+        urls=list(dict.fromkeys(urls)),
+        raw_text=str(evidence),
         resolution_status="unresolved",
     )
-    return signal, company
 
 
-def _split_source_documents(corpus: str) -> list[str]:
-    return [part.strip() for part in corpus.split(SOURCE_DOCUMENT_SEPARATOR) if part.strip()]
+def _signal_key(signal: OpportunitySignal) -> tuple[str, str]:
+    return _normalize(signal.company), _normalize(signal.role_title)
 
 
-def _extract_structured_email_document(
-    *,
-    source_name: str,
-    source_message_id: str,
-    source_date,
-    document: str,
-) -> tuple[list[OpportunitySignal], str, bool]:
-    """Parse a single EMAIL document; structured job tables become authoritative."""
-    lines = document.splitlines()
-    signals: list[OpportunitySignal] = []
-    residual: list[str] = []
-    in_table = False
-    section = ""
-    carried_company: str | None = None
-    saw_structured_job_table = False
-
-    for raw_line in lines:
-        line = raw_line.strip()
-        upper = re.sub(r"[^A-Z]", "", line.upper())
-        if upper == "JOBS":
-            section = SECTION_JOBS
-            carried_company = None
+def _dedupe_signals(signals: list[OpportunitySignal]) -> list[OpportunitySignal]:
+    merged: dict[tuple[str, str], OpportunitySignal] = {}
+    for signal in signals:
+        key = _signal_key(signal)
+        previous = merged.get(key)
+        if previous is None:
+            merged[key] = signal
             continue
-        if upper == "INTERNSHIPS":
-            section = SECTION_INTERNSHIPS
-            carried_company = None
-            continue
-        if upper == "EVENTS":
-            section = SECTION_EVENTS
-            carried_company = None
-            continue
-        if line == TABLE_START:
-            in_table = True
-            carried_company = None
-            if section in {SECTION_JOBS, SECTION_INTERNSHIPS}:
-                saw_structured_job_table = True
-            continue
-        if line == TABLE_END:
-            in_table = False
-            carried_company = None
-            continue
-        if in_table:
-            if section not in {SECTION_JOBS, SECTION_INTERNSHIPS}:
-                continue
-            cells = [cell.strip() for cell in raw_line.split("|")]
-            signal, carried_company = _table_row_signal(
-                source_name=source_name,
-                source_message_id=source_message_id,
-                source_date=source_date,
-                section=section,
-                cells=cells,
-                carried_company=carried_company,
-            )
-            if signal is not None:
-                signals.append(signal)
-            continue
-        if section == SECTION_EVENTS:
-            continue
-        residual.append(raw_line)
-
-    residual_text = "" if saw_structured_job_table else "\n".join(residual)
-    return signals, residual_text, saw_structured_job_table
-
-
-def _key(item) -> tuple[str, str]:
-    company = _normalize(item.company)
-    title = _normalize(item.role_title)
-    return company, re.sub(r"\s+", " ", title)
-
-
-def _merge_signal(
-    merged: dict[tuple[str, str], OpportunitySignal],
-    signal: OpportunitySignal,
-) -> None:
-    key = (_normalize(signal.company), _normalize(signal.role_title))
-    if not all(key):
-        return
-    existing = merged.get(key)
-    if existing is None:
-        merged[key] = signal
-        return
-    merged[key] = existing.model_copy(
-        update={
-            "urls": list(dict.fromkeys([*existing.urls, *signal.urls])),
-            "location": existing.location or signal.location,
-            "opportunity_type": (
-                existing.opportunity_type
-                if existing.opportunity_type != "unknown"
-                else signal.opportunity_type
-            ),
-            "deadline_hint": existing.deadline_hint or signal.deadline_hint,
-            "target_major": list(dict.fromkeys([*existing.target_major, *signal.target_major])),
-            "target_degree_level": list(
-                dict.fromkeys([*existing.target_degree_level, *signal.target_degree_level])
-            ),
-            "raw_text": existing.raw_text or signal.raw_text,
-        }
-    )
-
-
-def _url_match_text(url: str) -> str:
-    """Turn a concrete careers URL/query into searchable title-like text."""
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return ""
-    parts = [unquote(parsed.path)]
-    query = parse_qs(parsed.query)
-    for key in ("jobName", "jobname", "title", "position", "job"):
-        parts.extend(query.get(key, []))
-    return " ".join(parts).replace("-", " ").replace("_", " ")
-
-
-def _url_title_overlap(title: str | None, url: str) -> float:
-    title_tokens = {
-        token
-        for token in URL_TOKEN_PATTERN.findall((title or "").lower())
-        if len(token) >= 3 or token.isdigit()
-    }
-    if not title_tokens:
-        return 0.0
-    url_tokens = set(URL_TOKEN_PATTERN.findall(_url_match_text(url).lower()))
-    return len(title_tokens & url_tokens) / len(title_tokens)
-
-
-def _looks_like_direct_job_url(url: str) -> bool:
-    lowered = url.lower()
-    return any(
-        marker in lowered
-        for marker in (
-            "jobdetail",
-            "jobcode=",
-            "/job/",
-            "/jobs/",
-            "/position/",
-            "requisition",
+        merged[key] = previous.model_copy(
+            update={
+                "deadline_hint": previous.deadline_hint or signal.deadline_hint,
+                "location": previous.location or signal.location,
+                "target_major": list(dict.fromkeys([*previous.target_major, *signal.target_major])),
+                "target_degree_level": list(
+                    dict.fromkeys([*previous.target_degree_level, *signal.target_degree_level])
+                ),
+                "urls": list(dict.fromkeys([*previous.urls, *signal.urls])),
+                "raw_text": previous.raw_text or signal.raw_text,
+            }
         )
-    )
+    return list(merged.values())
 
 
-def _reattach_direct_urls(
-    opportunities: list[OpportunitySignal],
-    corpus: str,
-) -> list[OpportunitySignal]:
-    """Attach PDF/email embedded job URLs to the most compatible extracted role."""
-    corpus_urls = [
-        url
-        for url in extract_links_from_text(corpus)
-        if _looks_like_direct_job_url(url)
-    ]
-    if not corpus_urls:
-        return opportunities
-
-    enriched: list[OpportunitySignal] = []
-    for signal in opportunities:
+def _reattach_direct_urls(signals: list[OpportunitySignal], corpus: str) -> list[OpportunitySignal]:
+    all_urls = extract_links_from_text(corpus)
+    if not all_urls:
+        return signals
+    updated: list[OpportunitySignal] = []
+    for signal in signals:
         if signal.urls:
-            enriched.append(signal)
+            updated.append(signal)
             continue
-        scored = sorted(
-            ((_url_title_overlap(signal.role_title, url), url) for url in corpus_urls),
-            reverse=True,
-        )
-        if scored and scored[0][0] >= 0.65:
-            best_score, best_url = scored[0]
-            second_score = scored[1][0] if len(scored) > 1 else 0.0
-            # Avoid attaching a URL when two postings look equally plausible.
-            if best_score - second_score >= 0.10 or best_score >= 0.90:
-                enriched.append(signal.model_copy(update={"urls": [best_url]}))
+        role_tokens = set(URL_TOKEN_PATTERN.findall(_normalize(signal.role_title)))
+        company_tokens = set(URL_TOKEN_PATTERN.findall(_normalize(signal.company)))
+        matched: list[str] = []
+        for url in all_urls:
+            normalized_url = _normalize(unquote(url))
+            url_tokens = set(URL_TOKEN_PATTERN.findall(normalized_url))
+            if not role_tokens:
                 continue
-        enriched.append(signal)
-    return enriched
+            title_overlap = len(role_tokens & url_tokens) / max(1, len(role_tokens))
+            company_overlap = bool(company_tokens & url_tokens)
+            if title_overlap >= 0.5 and company_overlap:
+                matched.append(url)
+        if matched:
+            signal = signal.model_copy(update={"urls": list(dict.fromkeys(matched))})
+        updated.append(signal)
+    return updated
 
 
 def extract_all_opportunities(
@@ -447,65 +374,34 @@ def extract_all_opportunities(
     source_date,
     corpus: str,
 ) -> tuple[list[OpportunitySignal], ExtractionMetrics, list[str]]:
-    """Structured email tables first; LLM only for independent non-table documents."""
-    errors: list[str] = []
-    merged: dict[tuple[str, str], OpportunitySignal] = {}
-    llm_inputs: list[str] = []
+    table_signals = _table_signals(
+        source_name=source_name,
+        source_message_id=source_message_id,
+        source_date=source_date,
+        corpus=corpus,
+    )
 
-    documents = _split_source_documents(corpus)
-    for document in documents:
-        if document.startswith("SOURCE: EMAIL\n"):
-            table_signals, residual, _ = _extract_structured_email_document(
+    llm_items: list = []
+    llm_calls = 0
+    errors: list[str] = []
+    for chunk in _chunks(corpus):
+        chunk_items, chunk_calls, chunk_errors = _invoke_with_adaptive_retry(chunk)
+        llm_calls += chunk_calls
+        llm_items.extend(chunk_items)
+        errors.extend(chunk_errors)
+
+    llm_signals = [
+        signal
+        for item in llm_items
+        if (
+            signal := _from_llm_item(
+                item,
                 source_name=source_name,
                 source_message_id=source_message_id,
                 source_date=source_date,
-                document=document,
             )
-            for signal in table_signals:
-                _merge_signal(merged, signal)
-            if residual.strip():
-                llm_inputs.append(residual)
-        else:
-            llm_inputs.append(document)
-
-    llm_calls = 0
-    extracted = []
-    for llm_input in llm_inputs:
-        for index, chunk in enumerate(_chunks(llm_input), start=1):
-            if len(chunk.strip()) < 180:
-                continue
-            chunk_items, chunk_calls, chunk_errors = _invoke_with_adaptive_retry(chunk)
-            llm_calls += chunk_calls
-            extracted.extend(chunk_items)
-            for error in chunk_errors:
-                errors.append(
-                    f"all-job non-table chunk {index} failed after adaptive retry: {error}"
-                )
-
-    for item in extracted:
-        key = _key(item)
-        if not all(key):
-            continue
-        signal = OpportunitySignal(
-            source_type="outlook",
-            source_name=source_name,
-            source_message_id=source_message_id,
-            source_date=source_date,
-            company=item.company,
-            role_title=item.role_title,
-            location=item.location,
-            opportunity_type=item.opportunity_type,
-            target_major=item.target_major or [],
-            target_degree_level=item.target_degree_level or [],
-            urls=list(dict.fromkeys(item.urls or [])),
-            raw_text=item.evidence_text or "",
-            resolution_status="unresolved",
         )
-        _merge_signal(merged, signal)
-
-    opportunities = _reattach_direct_urls(list(merged.values()), corpus)
-    return (
-        opportunities,
-        ExtractionMetrics(llm_calls=llm_calls, source_chars=len(corpus)),
-        errors,
-    )
+    ]
+    signals = _dedupe_signals([*table_signals, *llm_signals])
+    signals = _reattach_direct_urls(signals, corpus)
+    return signals, ExtractionMetrics(llm_calls=llm_calls, source_chars=len(corpus)), errors

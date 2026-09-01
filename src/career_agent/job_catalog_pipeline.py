@@ -20,15 +20,13 @@ ProgressCallback = Callable[[str], None]
 COMPANY_CANONICAL_ALIASES = {
     "pg": "procter gamble",
     "procter gamble": "procter gamble",
-    "procter and gamble": "procter gamble",
-    "watson s": "watsons",
+    "procterandgamble": "procter gamble",
     "watsons": "watsons",
-    "deutsche bank": "deutsche bank",
-    "deutsche bank ag": "deutsche bank",
+    "deutschebank": "deutsche bank",
     "ey": "ernst young",
-    "ernst young": "ernst young",
-    "ernst young singapore ey": "ernst young",
-    "ernst young solutions": "ernst young",
+    "ernstyoung": "ernst young",
+    "ernstyoungsingaporeey": "ernst young",
+    "ernstyoungsolutions": "ernst young",
 }
 LEGAL_SUFFIXES = {
     "pte",
@@ -56,8 +54,10 @@ def _canonical_company_text(company: str | None) -> str:
     raw = re.sub(r"[^a-z0-9]+", " ", raw)
     tokens = [token for token in raw.split() if token not in LEGAL_SUFFIXES]
     value = " ".join(tokens).strip()
-    compact = " ".join(value.replace(" and ", " ").split())
-    return COMPANY_CANONICAL_ALIASES.get(value, COMPANY_CANONICAL_ALIASES.get(compact, compact))
+    compact = "".join(token for token in tokens if token != "and")
+    if compact in COMPANY_CANONICAL_ALIASES:
+        return COMPANY_CANONICAL_ALIASES[compact]
+    return value.replace(" and ", " ").strip()
 
 
 def _company_key(signal: OpportunitySignal) -> str:
@@ -141,10 +141,6 @@ def research_career_email_for_catalog(
     filtered_generic = 0
 
     for index, signal in enumerate(opportunities, start=1):
-        # TalentConnect may emit a company-level search seed such as "Career
-        # opportunities" when the newsletter has no concrete title. That is useful
-        # for discovery, but it is not itself a job and must never enter the final
-        # matching catalog as if it were one.
         if record.source == "talentconnect" and _is_generic_talentconnect_seed(signal):
             filtered_generic += 1
             continue

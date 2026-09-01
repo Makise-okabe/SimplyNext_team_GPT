@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from career_agent.all_job_extraction import ExtractionMetrics
+from career_agent.batch_sources import TABLE_END, TABLE_START
 from career_agent.goh_extraction import extract_goh_opportunities
 from career_agent.job_catalog_pipeline import (
     _company_key,
@@ -42,12 +43,12 @@ def test_generic_ats_url_must_match_current_company() -> None:
 
 def test_goh_structured_row_does_not_inherit_global_wrong_company_url() -> None:
     wrong = "https://employmenthero.com/sg/jobs/position/transcelestial-software-engineer/"
-    corpus = """SOURCE: EMAIL
+    corpus = f"""SOURCE: EMAIL
 JOBS
-[[TABLE_START]]
+{TABLE_START}
 INDUSTRY | COMPANY | ROLE | TC ID | REMARKS
 ICT | Reolink | AI Engineer | 6a123456789012001d123456 | Deadline: 3 Nov 2026
-[[TABLE_END]]
+{TABLE_END}
 """
 
     def fake_base_extractor(**kwargs):

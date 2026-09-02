@@ -25,6 +25,12 @@ DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 DUCKDUCKGO_LITE_URL = "https://lite.duckduckgo.com/lite/"
 SEARCH_TIMEOUT_SECONDS = 6.0
 SITE_PATTERN = re.compile(r"(?i)(?:^|\s)site:([^\s\"']+)")
+QUOTED_PATTERN = re.compile(r'"([^\"]+)"')
+TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+QUERY_STOPWORDS = {
+    "the", "and", "for", "with", "job", "jobs", "career", "careers",
+    "role", "position", "singapore", "pte", "ltd", "limited", "private",
+}
 
 
 def _unwrap_duckduckgo_url(href: str) -> str:
@@ -117,6 +123,58 @@ def _apply_site_constraint(
     if constraint is None:
         return results[:max_results]
     return [result for result in results if _result_matches_site(result, constraint)][:max_results]
+
+
+def _query_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in TOKEN_PATTERN.findall((value or "").lower())
+        if len(token) >= 3 and token not in QUERY_STOPWORDS
+    }
+
+
+def _quoted_query_parts(query: str) -> list[str]:
+    return [part.strip() for part in QUOTED_PATTERN.findall(query or "") if part.strip()]
+
+
+def _result_matches_quoted_query(result: SearchResult, query: str) -> bool:
+    """Reject obviously unrelated results for company + exact-title lookups.
+
+    This is intentionally applied only when the query contains at least two quoted
+    phrases, which is the Track B shape: "Company" "Exact Role Title" ....
+    Site-scoped and generic searches keep their existing behavior.
+    """
+    parts = _quoted_query_parts(query)
+    if len(parts) < 2:
+        return True
+
+    text = f"{result.title} {result.snippet} {result.url}".lower()
+    text_tokens = _query_tokens(text)
+
+    company_tokens = _query_tokens(parts[0])
+    title_tokens = _query_tokens(parts[1])
+
+    company_match = not company_tokens or bool(company_tokens & text_tokens)
+    if not company_match:
+        compact_company = "".join(sorted(company_tokens))
+        compact_text = re.sub(r"[^a-z0-9]", "", text)
+        company_match = bool(compact_company and compact_company in compact_text)
+
+    if not title_tokens:
+        title_match = parts[1].lower() in text
+    else:
+        overlap = len(title_tokens & text_tokens) / len(title_tokens)
+        title_match = overlap >= 0.50
+
+    return company_match and title_match
+
+
+def _apply_query_relevance(
+    results: list[SearchResult],
+    query: str,
+    max_results: int,
+) -> list[SearchResult]:
+    return [result for result in results if _result_matches_quoted_query(result, query)][:max_results]
 
 
 def _simplify_query(query: str) -> str:
@@ -311,13 +369,21 @@ def _search_variants(query: str, constraint: tuple[str, str] | None) -> list[str
     return variants
 
 
-def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
-    """Stable provider first, then zero-config public-search fallbacks.
+def _filter_results(
+    results: list[SearchResult],
+    *,
+    original_query: str,
+    constraint: tuple[str, str] | None,
+    max_results: int,
+) -> list[SearchResult]:
+    constrained = _apply_site_constraint(results, constraint, max_results)
+    if constraint is not None:
+        return constrained
+    return _apply_query_relevance(constrained, original_query, max_results)
 
-    Tavily is optional and used only when ``TAVILY_API_KEY`` is configured. All
-    providers still pass through the same site constraint, so a LinkedIn fallback
-    cannot accidentally return a non-LinkedIn page.
-    """
+
+def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
+    """Search public web with deterministic relevance checks and provider failover."""
     if not query.strip():
         return []
 
@@ -333,10 +399,11 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
 
     for variant in variants:
         try:
-            tavily_results = _apply_site_constraint(
+            tavily_results = _filter_results(
                 _search_tavily(variant, max_results),
-                constraint,
-                max_results,
+                original_query=query,
+                constraint=constraint,
+                max_results=max_results,
             )
             if tavily_results:
                 return tavily_results
@@ -359,7 +426,12 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
                     max_results=max_results,
                     headers=headers,
                 )
-                results = _apply_site_constraint(raw_results, constraint, max_results)
+                results = _filter_results(
+                    raw_results,
+                    original_query=query,
+                    constraint=constraint,
+                    max_results=max_results,
+                )
                 if results:
                     return results
             except Exception:

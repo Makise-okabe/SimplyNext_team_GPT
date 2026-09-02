@@ -229,6 +229,7 @@ def rerank_stage1(
     stage1_top_n: int = 20,
     llm=None,
     batch_size: int = STAGE2_BATCH_SIZE,
+    show_progress: bool = False,
 ) -> list[Stage2RankedJob]:
     selected = list(stage1_rankings[: max(stage1_top_n, 0)])
     source_jobs = [_find_source_job(item, all_jobs) for item in selected]
@@ -238,10 +239,14 @@ def rerank_stage1(
     model = llm or _build_llm()
     batch_size = max(1, int(batch_size))
     by_index: dict[int, SemanticAssessment] = {}
+    total_batches = (len(selected) + batch_size - 1) // batch_size
 
-    for start in range(0, len(selected), batch_size):
+    for batch_number, start in enumerate(range(0, len(selected), batch_size), start=1):
         ranked_chunk = selected[start : start + batch_size]
         job_chunk = source_jobs[start : start + batch_size]
+
+        if show_progress:
+            print(f"      Stage 2 batch {batch_number}/{total_batches}: requesting {len(ranked_chunk)} candidates...")
 
         try:
             found = _assess_chunk(
@@ -251,14 +256,27 @@ def rerank_stage1(
                 ranked_chunk=ranked_chunk,
                 job_chunk=job_chunk,
             )
-        except Exception:
+        except Exception as exc:
             found = {}
+            if show_progress:
+                print(f"      Stage 2 batch {batch_number}/{total_batches}: failed ({type(exc).__name__})")
 
         for local_index, assessment in found.items():
             by_index.setdefault(start + local_index, assessment)
 
         missing_local = [index for index in range(len(ranked_chunk)) if index not in found]
-        for original_local in missing_local:
+        if show_progress:
+            print(
+                f"      Stage 2 batch {batch_number}/{total_batches}: "
+                f"assessed {len(found)}/{len(ranked_chunk)}"
+            )
+
+        for retry_number, original_local in enumerate(missing_local, start=1):
+            if show_progress:
+                print(
+                    f"        retry {retry_number}/{len(missing_local)} "
+                    f"for candidate {start + original_local + 1}..."
+                )
             try:
                 retry_found = _assess_chunk(
                     model=model,
@@ -267,12 +285,18 @@ def rerank_stage1(
                     ranked_chunk=[ranked_chunk[original_local]],
                     job_chunk=[job_chunk[original_local]],
                 )
-            except Exception:
+            except Exception as exc:
                 retry_found = {}
+                if show_progress:
+                    print(f"          failed ({type(exc).__name__})")
 
             assessment = retry_found.get(0)
             if assessment is not None:
                 by_index.setdefault(start + original_local, assessment)
+                if show_progress:
+                    print("          assessed")
+            elif show_progress:
+                print("          still missing")
 
     results: list[Stage2RankedJob] = []
     for index, (ranked, job) in enumerate(zip(selected, source_jobs)):

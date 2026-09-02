@@ -174,9 +174,63 @@ def test_stage2_retries_missing_assessment_and_restores_full_coverage():
     assert marketing.semantic_score == 30.0
 
 
+def test_stage2_recovers_whole_failed_batch_with_individual_retries():
+    stage1 = _stage1() * 3
+    jobs = _jobs() * 3
+    llm = FakeLLM(
+        [
+            SemanticAssessmentBatch(assessments=[]),
+            *[
+                SemanticAssessmentBatch(
+                    assessments=[
+                        SemanticAssessment(
+                            candidate_index=0,
+                            semantic_score=80 - index,
+                            fit_label="good",
+                            why_match="Recovered individual assessment.",
+                            matched_evidence=[],
+                            missing_or_weak_evidence=[],
+                            confidence="medium",
+                        )
+                    ]
+                )
+                for index in range(5)
+            ],
+            SemanticAssessmentBatch(
+                assessments=[
+                    SemanticAssessment(
+                        candidate_index=0,
+                        semantic_score=70,
+                        fit_label="good",
+                        why_match="Final batch assessment.",
+                        matched_evidence=[],
+                        missing_or_weak_evidence=[],
+                        confidence="medium",
+                    )
+                ]
+            ),
+        ]
+    )
+
+    results = rerank_stage1(
+        resume_text="technical resume",
+        student_profile=_student(),
+        all_jobs=jobs,
+        stage1_rankings=stage1,
+        stage1_top_n=6,
+        batch_size=5,
+        llm=llm,
+    )
+
+    assert len(llm.calls) == 7
+    assert len(results) == 6
+    assert all(item.semantic_assessed for item in results)
+
+
 def test_stage2_caps_fallback_after_retry_failure():
     llm = FakeLLM(
         [
+            SemanticAssessmentBatch(assessments=[]),
             SemanticAssessmentBatch(assessments=[]),
             SemanticAssessmentBatch(assessments=[]),
         ]
@@ -191,7 +245,7 @@ def test_stage2_caps_fallback_after_retry_failure():
         llm=llm,
     )
 
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == 3
     assert all(not item.semantic_assessed for item in results)
     assert all(item.final_score <= 60.0 for item in results)
     assert all("missing after retry" in item.missing_or_weak_evidence[0] for item in results)

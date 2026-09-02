@@ -1,3 +1,4 @@
+from career_agent import stage2_ranking
 from career_agent.stage2_ranking import (
     SemanticAssessment,
     SemanticAssessmentBatch,
@@ -193,3 +194,26 @@ def test_stage2_ignores_duplicate_and_out_of_range_assessments():
 
     chip = next(item for item in results if item.company == "Chip Co")
     assert chip.semantic_score == 88.0
+
+
+def test_stage2_build_llm_uses_json_schema_not_function_calling(monkeypatch):
+    captured = {}
+
+    class FakeChatGroq:
+        def __init__(self, **kwargs):
+            captured["init"] = kwargs
+
+        def with_structured_output(self, schema, **kwargs):
+            captured["schema"] = schema
+            captured["structured"] = kwargs
+            return "json-schema-model"
+
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.setattr(stage2_ranking, "ChatGroq", FakeChatGroq)
+
+    model = stage2_ranking._build_llm()
+
+    assert model == "json-schema-model"
+    assert captured["schema"] is SemanticAssessmentBatch
+    assert captured["structured"]["method"] == "json_schema"
+    assert captured["structured"]["strict"] is False

@@ -94,7 +94,7 @@ def main() -> None:
     _write_json(Path(args.stage1_output), stage1_payload)
     print(f"      ranked={len(ranked)} shortlist={stage1_payload['top_n']}")
 
-    print("[3/3] Semantically reranking shortlist with one LLM call...")
+    print("[3/3] Semantically reranking shortlist in small LLM batches...")
     final = rerank_stage1(
         resume_text=resume_text,
         student_profile=profile_payload,
@@ -102,12 +102,15 @@ def main() -> None:
         stage1_rankings=stage1_payload["rankings"],
         stage1_top_n=args.stage1_top,
     )
+    semantic_assessed = sum(item.semantic_assessed for item in final)
     final_payload = {
-        "schema": "simplinext.final_ranking.v1",
+        "schema": "simplinext.final_ranking.v2",
         "resume_file": resume_path.name,
         "transcript_file": transcript_path.name,
         "active_job_count": len(ranked),
         "stage1_shortlist_count": len(final),
+        "semantic_assessed_count": semantic_assessed,
+        "semantic_coverage": round(semantic_assessed / len(final), 4) if final else 0.0,
         "final_top_n": min(max(args.top, 0), len(final)),
         "rankings": [item.to_dict() for item in final],
     }
@@ -116,10 +119,11 @@ def main() -> None:
     top_n = final_payload["final_top_n"]
     print()
     print("SIMPLYNEXT FINAL MATCHES")
-    print("Active jobs  :", len(ranked))
-    print("LLM shortlist:", len(final))
-    print("Top shown    :", top_n)
-    print("Output       :", args.output)
+    print("Active jobs      :", len(ranked))
+    print("LLM shortlist    :", len(final))
+    print(f"Semantic assessed: {semantic_assessed}/{len(final)}")
+    print("Top shown        :", top_n)
+    print("Output           :", args.output)
     print()
 
     for index, item in enumerate(final[:top_n], start=1):
@@ -132,6 +136,7 @@ def main() -> None:
         if item.missing_or_weak_evidence:
             print("    gaps    :", "; ".join(item.missing_or_weak_evidence))
         print("    job data:", item.evidence_level)
+        print("    semantic:", "assessed" if item.semantic_assessed else "missing")
         print("    URL     :", item.application_url or item.official_job_url or "<unavailable>")
 
 

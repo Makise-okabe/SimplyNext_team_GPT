@@ -258,25 +258,20 @@ def rerank_stage1(
             by_index.setdefault(start + local_index, assessment)
 
         missing_local = [index for index in range(len(ranked_chunk)) if index not in found]
-        if not missing_local:
-            continue
+        for original_local in missing_local:
+            try:
+                retry_found = _assess_chunk(
+                    model=model,
+                    resume_text=resume_text,
+                    student_profile=student_profile,
+                    ranked_chunk=[ranked_chunk[original_local]],
+                    job_chunk=[job_chunk[original_local]],
+                )
+            except Exception:
+                retry_found = {}
 
-        retry_ranked = [ranked_chunk[index] for index in missing_local]
-        retry_jobs = [job_chunk[index] for index in missing_local]
-        try:
-            retry_found = _assess_chunk(
-                model=model,
-                resume_text=resume_text,
-                student_profile=student_profile,
-                ranked_chunk=retry_ranked,
-                job_chunk=retry_jobs,
-            )
-        except Exception:
-            retry_found = {}
-
-        for retry_local_index, assessment in retry_found.items():
-            if 0 <= retry_local_index < len(missing_local):
-                original_local = missing_local[retry_local_index]
+            assessment = retry_found.get(0)
+            if assessment is not None:
                 by_index.setdefault(start + original_local, assessment)
 
     results: list[Stage2RankedJob] = []

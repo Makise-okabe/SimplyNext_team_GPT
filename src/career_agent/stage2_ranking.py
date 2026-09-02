@@ -63,7 +63,11 @@ def _build_llm():
         temperature=0,
         timeout=LLM_TIMEOUT_SECONDS,
         max_retries=LLM_MAX_RETRIES,
-    ).with_structured_output(SemanticAssessmentBatch)
+    ).with_structured_output(
+        SemanticAssessmentBatch,
+        method="json_schema",
+        strict=False,
+    )
 
 
 def _course_summary(student_profile: dict) -> list[dict]:
@@ -134,6 +138,7 @@ def build_stage2_prompt(
 You are the final semantic career-matching judge for an NUS student.
 
 Evaluate ALL candidates below. Return exactly one assessment for every candidate_index, with no duplicates.
+Return one JSON object with this root shape: {{"assessments": [ ... ]}}.
 Do not discover new jobs and do not browse the web.
 
 EVIDENCE RULES:
@@ -147,6 +152,9 @@ EVIDENCE RULES:
 8. Seniority matters. Penalize clearly senior roles if the resume does not support that seniority.
 9. If job evidence is sparse, the candidate may still be a good match, but confidence must be lower.
 10. Use the whole resume, projects, internships and courses. Do not rely only on the Stage-1 matched-skill list.
+11. For `source_only` jobs, NEVER invent employer requirements from general industry knowledge. Only treat requirements explicitly present in `job_evidence` as employer requirements.
+12. If a `source_only` job lacks enough requirements to identify a specific gap, say that the job requirements are unavailable or evidence is sparse. Do not name speculative certifications, standards, tools, years of experience, or domain requirements.
+13. `missing_or_weak_evidence` must be grounded either in explicit job evidence or in an obvious property of the title itself, such as a role explicitly labelled Senior. Do not speculate beyond that.
 
 SCORING CALIBRATION:
 90-100: unusually strong fit with multiple direct resume/project/course signals and little role mismatch.
@@ -155,8 +163,8 @@ SCORING CALIBRATION:
 45-64: possible but weak/partial fit.
 0-44: poor fit or mostly generic overlap.
 
-For `matched_evidence`, write short concrete evidence items, e.g. "Infineon power-electronics R&D internship" or "EE2028 microcontroller course".
-For `missing_or_weak_evidence`, identify actual gaps or uncertainty; do not invent employer requirements.
+For `matched_evidence`, write short concrete evidence items supported by the resume or courses.
+For `missing_or_weak_evidence`, identify only grounded gaps or evidence uncertainty.
 Keep `why_match` concise (1-3 sentences).
 
 STUDENT:
@@ -222,8 +230,6 @@ def rerank_stage1(
             gaps = ("LLM semantic assessment missing",)
         else:
             semantic_score = float(assessment.semantic_score)
-            # Semantic judgement drives the final result, while Stage 1 provides
-            # a small deterministic anchor against one-call LLM instability.
             final_score = round(0.8 * semantic_score + 0.2 * stage1_score, 1)
             fit_label = assessment.fit_label
             confidence = assessment.confidence

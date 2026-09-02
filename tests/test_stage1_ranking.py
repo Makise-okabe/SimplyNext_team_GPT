@@ -3,7 +3,7 @@ from career_agent.stage1_ranking import rank_job, rank_jobs
 
 def _student():
     return {
-        "explicit_skills": ["python", "semiconductor", "eda/cadence"],
+        "explicit_skills": ["python", "semiconductor", "eda/cadence", "communication"],
         "course_derived_skills": ["machine learning", "digital design", "analog circuits"],
     }
 
@@ -68,7 +68,7 @@ def test_rank_jobs_sorts_best_match_first():
         {
             "company": "Marketing Co",
             "title": "Brand Marketing Intern",
-            "source_evidence": "brand marketing",
+            "source_evidence": "brand marketing communication",
             "matching_evidence_level": "source_only",
         },
         {
@@ -83,3 +83,49 @@ def test_rank_jobs_sorts_best_match_first():
 
     assert ranked[0].company == "Chip Co"
     assert ranked[0].score > ranked[1].score
+
+
+def test_generic_only_match_cannot_rank_near_the_top():
+    job = {
+        "company": "Henkel",
+        "title": "Corporate Communications Intern",
+        "source_evidence": "communication",
+        "matching_evidence_level": "source_only",
+    }
+
+    result = rank_job(_student(), job)
+    assert result.matched_resume_skills == ("communication",)
+    assert result.score <= 28.0
+
+
+def test_single_substantive_skill_has_a_ceiling():
+    job = {
+        "company": "Reolink",
+        "title": "Backend Engineer",
+        "source_evidence": "software engineer",
+        "matching_evidence_level": "source_only",
+    }
+    student = {
+        "explicit_skills": ["software engineering"],
+        "course_derived_skills": [],
+    }
+
+    result = rank_job(student, job)
+    assert result.score <= 68.0
+
+
+def test_multi_skill_technical_match_beats_generic_communications_role():
+    chip = {
+        "company": "Nanyang Singtech",
+        "title": "Chip Design Engineer",
+        "source_evidence": "semiconductor Cadence digital design analog circuits",
+        "matching_evidence_level": "source_only",
+    }
+    comms = {
+        "company": "Henkel",
+        "title": "Corporate Communications Intern",
+        "source_evidence": "communication",
+        "matching_evidence_level": "source_only",
+    }
+
+    assert rank_job(_student(), chip).score > rank_job(_student(), comms).score

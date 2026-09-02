@@ -7,13 +7,18 @@ from career_agent.stage2_ranking import (
 
 
 class FakeLLM:
-    def __init__(self, batch):
-        self.batch = batch
+    def __init__(self, batches):
+        if isinstance(batches, list):
+            self.batches = list(batches)
+        else:
+            self.batches = [batches]
         self.calls = []
 
     def invoke(self, prompt):
         self.calls.append(prompt)
-        return self.batch
+        if self.batches:
+            return self.batches.pop(0)
+        return SemanticAssessmentBatch(assessments=[])
 
 
 def _student():
@@ -75,30 +80,32 @@ def _jobs():
     ]
 
 
-def test_stage2_uses_one_llm_call_and_semantic_score_drives_order():
+def test_stage2_batches_candidates_and_semantic_score_drives_order():
     llm = FakeLLM(
-        SemanticAssessmentBatch(
-            assessments=[
-                SemanticAssessment(
-                    candidate_index=0,
-                    semantic_score=94,
-                    fit_label="strong",
-                    why_match="Direct semiconductor and Cadence evidence.",
-                    matched_evidence=["Cadence Virtuoso", "semiconductor experience"],
-                    missing_or_weak_evidence=["Job evidence is source-only"],
-                    confidence="medium",
-                ),
-                SemanticAssessment(
-                    candidate_index=1,
-                    semantic_score=28,
-                    fit_label="weak",
-                    why_match="Mostly generic overlap and role-family mismatch.",
-                    matched_evidence=[],
-                    missing_or_weak_evidence=["No marketing experience"],
-                    confidence="medium",
-                ),
-            ]
-        )
+        [
+            SemanticAssessmentBatch(
+                assessments=[
+                    SemanticAssessment(
+                        candidate_index=0,
+                        semantic_score=94,
+                        fit_label="strong",
+                        why_match="Direct semiconductor and Cadence evidence.",
+                        matched_evidence=["Cadence Virtuoso", "semiconductor experience"],
+                        missing_or_weak_evidence=["Job evidence is source-only"],
+                        confidence="medium",
+                    ),
+                    SemanticAssessment(
+                        candidate_index=1,
+                        semantic_score=28,
+                        fit_label="weak",
+                        why_match="Mostly generic overlap and role-family mismatch.",
+                        matched_evidence=[],
+                        missing_or_weak_evidence=["No marketing experience"],
+                        confidence="medium",
+                    ),
+                ]
+            )
+        ]
     )
 
     results = rerank_stage1(
@@ -107,31 +114,48 @@ def test_stage2_uses_one_llm_call_and_semantic_score_drives_order():
         all_jobs=_jobs(),
         stage1_rankings=_stage1(),
         stage1_top_n=20,
+        batch_size=5,
         llm=llm,
     )
 
     assert len(llm.calls) == 1
+    assert all(item.semantic_assessed for item in results)
     assert results[0].company == "Chip Co"
     assert results[0].final_score > results[1].final_score
     assert results[0].application_url == "https://chip.example/apply"
     assert results[0].official_job_url == "https://chip.example/job"
 
 
-def test_stage2_preserves_all_candidates_even_when_llm_omits_one():
+def test_stage2_retries_missing_assessment_and_restores_full_coverage():
     llm = FakeLLM(
-        SemanticAssessmentBatch(
-            assessments=[
-                SemanticAssessment(
-                    candidate_index=0,
-                    semantic_score=90,
-                    fit_label="strong",
-                    why_match="Strong technical fit.",
-                    matched_evidence=["Cadence"],
-                    missing_or_weak_evidence=[],
-                    confidence="medium",
-                )
-            ]
-        )
+        [
+            SemanticAssessmentBatch(
+                assessments=[
+                    SemanticAssessment(
+                        candidate_index=0,
+                        semantic_score=90,
+                        fit_label="strong",
+                        why_match="Strong technical fit.",
+                        matched_evidence=["Cadence"],
+                        missing_or_weak_evidence=[],
+                        confidence="medium",
+                    )
+                ]
+            ),
+            SemanticAssessmentBatch(
+                assessments=[
+                    SemanticAssessment(
+                        candidate_index=0,
+                        semantic_score=30,
+                        fit_label="weak",
+                        why_match="Role-family mismatch.",
+                        matched_evidence=[],
+                        missing_or_weak_evidence=["Job evidence is sparse"],
+                        confidence="low",
+                    )
+                ]
+            ),
+        ]
     )
 
     results = rerank_stage1(
@@ -139,49 +163,23 @@ def test_stage2_preserves_all_candidates_even_when_llm_omits_one():
         student_profile=_student(),
         all_jobs=_jobs(),
         stage1_rankings=_stage1(),
+        batch_size=5,
         llm=llm,
     )
 
+    assert len(llm.calls) == 2
     assert len(results) == 2
+    assert all(item.semantic_assessed for item in results)
     marketing = next(item for item in results if item.company == "Marketing Co")
-    assert marketing.semantic_score == 84.0
-    assert marketing.confidence == "low"
-    assert "LLM semantic assessment missing" in marketing.missing_or_weak_evidence
+    assert marketing.semantic_score == 30.0
 
 
-def test_stage2_ignores_duplicate_and_out_of_range_assessments():
+def test_stage2_caps_fallback_after_retry_failure():
     llm = FakeLLM(
-        SemanticAssessmentBatch(
-            assessments=[
-                SemanticAssessment(
-                    candidate_index=0,
-                    semantic_score=88,
-                    fit_label="strong",
-                    why_match="First assessment wins.",
-                    matched_evidence=[],
-                    missing_or_weak_evidence=[],
-                    confidence="medium",
-                ),
-                SemanticAssessment(
-                    candidate_index=0,
-                    semantic_score=5,
-                    fit_label="weak",
-                    why_match="Duplicate must be ignored.",
-                    matched_evidence=[],
-                    missing_or_weak_evidence=[],
-                    confidence="low",
-                ),
-                SemanticAssessment(
-                    candidate_index=99,
-                    semantic_score=100,
-                    fit_label="strong",
-                    why_match="Out of range.",
-                    matched_evidence=[],
-                    missing_or_weak_evidence=[],
-                    confidence="high",
-                ),
-            ]
-        )
+        [
+            SemanticAssessmentBatch(assessments=[]),
+            SemanticAssessmentBatch(assessments=[]),
+        ]
     )
 
     results = rerank_stage1(
@@ -189,11 +187,53 @@ def test_stage2_ignores_duplicate_and_out_of_range_assessments():
         student_profile=_student(),
         all_jobs=_jobs(),
         stage1_rankings=_stage1(),
+        batch_size=5,
         llm=llm,
     )
 
-    chip = next(item for item in results if item.company == "Chip Co")
-    assert chip.semantic_score == 88.0
+    assert len(llm.calls) == 2
+    assert all(not item.semantic_assessed for item in results)
+    assert all(item.final_score <= 60.0 for item in results)
+    assert all("missing after retry" in item.missing_or_weak_evidence[0] for item in results)
+
+
+def test_stage2_small_batches_use_multiple_calls_without_dropping_candidates():
+    stage1 = _stage1() * 3
+    jobs = _jobs() * 3
+
+    batches = []
+    for size in (2, 2, 2):
+        batches.append(
+            SemanticAssessmentBatch(
+                assessments=[
+                    SemanticAssessment(
+                        candidate_index=index,
+                        semantic_score=80 - index,
+                        fit_label="good",
+                        why_match="Grounded fit.",
+                        matched_evidence=[],
+                        missing_or_weak_evidence=[],
+                        confidence="medium",
+                    )
+                    for index in range(size)
+                ]
+            )
+        )
+    llm = FakeLLM(batches)
+
+    results = rerank_stage1(
+        resume_text="technical resume",
+        student_profile=_student(),
+        all_jobs=jobs,
+        stage1_rankings=stage1,
+        stage1_top_n=6,
+        batch_size=2,
+        llm=llm,
+    )
+
+    assert len(llm.calls) == 3
+    assert len(results) == 6
+    assert all(item.semantic_assessed for item in results)
 
 
 def test_stage2_build_llm_uses_json_schema_not_function_calling(monkeypatch):

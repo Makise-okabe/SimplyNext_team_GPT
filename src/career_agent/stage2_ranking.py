@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import asdict, dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
@@ -15,6 +16,8 @@ LLM_TIMEOUT_SECONDS = 45.0
 LLM_MAX_RETRIES = 1
 LLM_MODEL = "openai/gpt-oss-120b"
 STAGE2_BATCH_SIZE = 5
+STAGE2_RATE_LIMIT_ATTEMPTS = 3
+STAGE2_RATE_LIMIT_FALLBACK_SECONDS = 5.0
 MISSING_ASSESSMENT_SCORE_CAP = 60.0
 
 
@@ -220,6 +223,58 @@ def _assess_chunk(
     return found
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    return "ratelimit" in name or "rate limit" in message or "rate_limit" in message
+
+
+def _retry_after_seconds(exc: Exception, attempt: int) -> float:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers:
+        value = headers.get("retry-after") or headers.get("Retry-After")
+        if value is not None:
+            try:
+                return max(float(value), 0.0)
+            except (TypeError, ValueError):
+                pass
+    return STAGE2_RATE_LIMIT_FALLBACK_SECONDS * (2 ** max(attempt - 1, 0))
+
+
+def _assess_chunk_with_rate_limit_retry(
+    *,
+    model,
+    resume_text: str,
+    student_profile: dict,
+    ranked_chunk: list[dict],
+    job_chunk: list[dict],
+    sleep_fn: Callable[[float], None],
+    show_progress: bool,
+    progress_indent: str,
+) -> dict[int, SemanticAssessment]:
+    for attempt in range(1, STAGE2_RATE_LIMIT_ATTEMPTS + 1):
+        try:
+            return _assess_chunk(
+                model=model,
+                resume_text=resume_text,
+                student_profile=student_profile,
+                ranked_chunk=ranked_chunk,
+                job_chunk=job_chunk,
+            )
+        except Exception as exc:
+            if not _is_rate_limit_error(exc) or attempt >= STAGE2_RATE_LIMIT_ATTEMPTS:
+                raise
+            delay = _retry_after_seconds(exc, attempt)
+            if show_progress:
+                print(
+                    f"{progress_indent}rate limited; waiting {delay:g}s "
+                    f"before attempt {attempt + 1}/{STAGE2_RATE_LIMIT_ATTEMPTS}..."
+                )
+            sleep_fn(delay)
+    return {}
+
+
 def rerank_stage1(
     *,
     resume_text: str,
@@ -230,6 +285,7 @@ def rerank_stage1(
     llm=None,
     batch_size: int = STAGE2_BATCH_SIZE,
     show_progress: bool = False,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> list[Stage2RankedJob]:
     selected = list(stage1_rankings[: max(stage1_top_n, 0)])
     source_jobs = [_find_source_job(item, all_jobs) for item in selected]
@@ -249,12 +305,15 @@ def rerank_stage1(
             print(f"      Stage 2 batch {batch_number}/{total_batches}: requesting {len(ranked_chunk)} candidates...")
 
         try:
-            found = _assess_chunk(
+            found = _assess_chunk_with_rate_limit_retry(
                 model=model,
                 resume_text=resume_text,
                 student_profile=student_profile,
                 ranked_chunk=ranked_chunk,
                 job_chunk=job_chunk,
+                sleep_fn=sleep_fn,
+                show_progress=show_progress,
+                progress_indent="        ",
             )
         except Exception as exc:
             found = {}
@@ -278,12 +337,15 @@ def rerank_stage1(
                     f"for candidate {start + original_local + 1}..."
                 )
             try:
-                retry_found = _assess_chunk(
+                retry_found = _assess_chunk_with_rate_limit_retry(
                     model=model,
                     resume_text=resume_text,
                     student_profile=student_profile,
                     ranked_chunk=[ranked_chunk[original_local]],
                     job_chunk=[job_chunk[original_local]],
+                    sleep_fn=sleep_fn,
+                    show_progress=show_progress,
+                    progress_indent="          ",
                 )
             except Exception as exc:
                 retry_found = {}

@@ -101,6 +101,7 @@ def main() -> None:
         all_jobs=jobs,
         stage1_rankings=stage1_payload["rankings"],
         stage1_top_n=args.stage1_top,
+        show_progress=True,
     )
     semantic_assessed = sum(item.semantic_assessed for item in final)
     final_payload = {

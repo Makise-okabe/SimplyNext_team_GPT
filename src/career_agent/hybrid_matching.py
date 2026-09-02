@@ -9,6 +9,7 @@ SKILL_PATTERNS: dict[str, tuple[str, ...]] = {
     "python": ("python",),
     "c/c++": ("c++", "cplusplus", "embedded c", " c "),
     "java": ("java",),
+    "programming": ("programming", "coding"),
     "javascript/typescript": ("javascript", "typescript", "node.js", "nodejs", "react.js", "reactjs"),
     "sql": ("sql", "text to sql", "database query"),
     "data analysis": ("data analysis", "data analytics", "analytics", "analyst"),
@@ -19,7 +20,7 @@ SKILL_PATTERNS: dict[str, tuple[str, ...]] = {
     "nlp": ("natural language processing", "nlp"),
     "cloud": ("cloud", "aws", "azure", "gcp"),
     "devops": ("devops", "ci/cd", "site reliability", "sre", "kubernetes", "docker"),
-    "software engineering": ("software engineer", "software engineering", "developer", "full stack", "full-stack", "backend", "front-end", "frontend"),
+    "software engineering": ("software engineer", "software engineering", "software development", "developer", "full stack", "full-stack", "backend", "front-end", "frontend"),
     "embedded systems": ("embedded", "firmware", "microcontroller", "mcu", "rtos"),
     "digital design": ("digital design", "digital ic", "logic design", "rtl"),
     "verilog/hdl": ("verilog", "systemverilog", "vhdl", "hdl", "rtl"),
@@ -34,6 +35,8 @@ SKILL_PATTERNS: dict[str, tuple[str, ...]] = {
     "automation": ("automation", "rpa", "power automate"),
     "excel": ("excel",),
     "power bi": ("power bi",),
+    "power systems": ("power systems", "power electronics", "electrical energy systems"),
+    "photonics": ("photonics", "optical", "optoelectronics"),
     "financial modelling": ("financial model", "financial modelling", "financial modeling", "valuation"),
     "investment research": ("investment analyst", "equity research", "investment research", "fund management"),
     "quantitative analysis": ("quantitative", "quant research", "statistics", "statistical"),
@@ -54,23 +57,32 @@ SKILL_PATTERNS: dict[str, tuple[str, ...]] = {
 TITLE_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\b(ai|machine learning|ml)\b", re.I), ("python", "machine learning", "deep learning")),
     (re.compile(r"\bdata (analyst|science|scientist|intelligence)\b", re.I), ("python", "sql", "data analysis")),
-    (re.compile(r"\b(backend|full[- ]?stack|software engineer|developer)\b", re.I), ("software engineering", "programming", "git")),
-    (re.compile(r"\b(site reliability|sre|devops)\b", re.I), ("devops", "cloud", "software engineering")),
+    (
+        re.compile(r"\b(backend|full[- ]?stack|software engineer|software development engineer|developer|front[- ]?end)\b", re.I),
+        ("software engineering", "programming"),
+    ),
+    (re.compile(r"\b(site reliability|sre|devops)\b", re.I), ("devops", "cloud", "software engineering", "programming")),
     (re.compile(r"\b(embedded|firmware)\b", re.I), ("embedded systems", "c/c++", "digital design")),
-    (re.compile(r"\b(chip|ic design|semiconductor|application engineer)\b", re.I), ("semiconductor", "digital design", "analog circuits", "eda/cadence")),
+    (re.compile(r"\b(chip|ic design|semiconductor)\b", re.I), ("semiconductor", "digital design", "analog circuits", "eda/cadence")),
+    (
+        re.compile(r"\b(electrical|electronics|electronic|hardware)\b", re.I),
+        ("analog circuits", "digital design", "embedded systems", "signal processing"),
+    ),
+    (re.compile(r"\b(power electronics|power engineer|power systems?)\b", re.I), ("power systems", "analog circuits")),
     (re.compile(r"\b(fpga|rtl|verilog|digital design)\b", re.I), ("digital design", "verilog/hdl", "fpga")),
-    (re.compile(r"\b(cyber|security|vulnerability|threat)\b", re.I), ("cybersecurity", "software engineering")),
+    (re.compile(r"\b(photonics|optical|optoelectronic)\b", re.I), ("photonics", "semiconductor")),
+    (re.compile(r"\b(cyber|security|vulnerability|threat)\b", re.I), ("cybersecurity", "software engineering", "programming")),
     (re.compile(r"\b(quant|investment analyst|fund management|global markets)\b", re.I), ("quantitative analysis", "investment research", "financial modelling")),
     (re.compile(r"\b(project engineer|project management)\b", re.I), ("project management", "stakeholder management", "communication")),
     (re.compile(r"\b(management associate|graduate programme|graduate program)\b", re.I), ("leadership", "communication", "stakeholder management")),
     (re.compile(r"\b(product manager|product management)\b", re.I), ("product management", "stakeholder management", "communication")),
+    (re.compile(r"\b(field application engineer|applications? engineer)\b", re.I), ("stakeholder management", "communication")),
     (re.compile(r"\b(marketing|brand|crm)\b", re.I), ("marketing", "communication", "data analysis")),
     (re.compile(r"\b(procurement|supply chain|demand planner|logistics)\b", re.I), ("supply chain", "data analysis", "communication")),
     (re.compile(r"\b(accountant|accounting|tax)\b", re.I), ("accounting", "excel", "data analysis")),
 )
 
 ALIASES = {
-    "programming": "software engineering",
     "git": "software engineering",
 }
 

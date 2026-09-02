@@ -79,11 +79,20 @@ def _normalize_text(text: str | None) -> str:
     return " ".join((text or "").lower().split())
 
 
+def _contains_phrase(value: str, phrase: str) -> bool:
+    phrase = phrase.lower().strip()
+    if not phrase:
+        return False
+    if re.fullmatch(r"[a-z0-9]+", phrase):
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", value))
+    return phrase in value
+
+
 def extract_explicit_skills(text: str | None) -> set[str]:
     value = f" {_normalize_text(text)} "
     found: set[str] = set()
     for skill, phrases in SKILL_PATTERNS.items():
-        if any(phrase.lower() in value for phrase in phrases):
+        if any(_contains_phrase(value, phrase) for phrase in phrases):
             found.add(skill)
     return found
 

@@ -57,7 +57,7 @@ def test_company_aliases_recognize_bcg_and_ey_official_domains() -> None:
     )
 
 
-def test_direct_official_url_uses_zero_searches_and_stops_before_secondary(monkeypatch) -> None:
+def test_direct_official_url_uses_zero_searches(monkeypatch) -> None:
     official = "https://careers.point72.com/CSJobDetail?jobCode=CPA-0014976"
     signal = _signal(
         "Point72",
@@ -81,12 +81,11 @@ def test_direct_official_url_uses_zero_searches_and_stops_before_secondary(monke
         ),
     )
 
-    context = ResearchContext()
     outcome = research_company_jobs(
         email=_email(),
         source_key="goh_ze_li",
         company_items=[(1, signal)],
-        context=context,
+        context=ResearchContext(),
     )
 
     job = outcome.job_records[0]
@@ -98,7 +97,7 @@ def test_direct_official_url_uses_zero_searches_and_stops_before_secondary(monke
     assert is_matching_ready(job)
 
 
-def test_same_company_roles_share_company_discovery_and_batch_official_search(monkeypatch) -> None:
+def test_each_role_gets_one_exact_title_search_and_official_candidate(monkeypatch) -> None:
     signals = [
         _signal("Ley Choon", "Management Associate"),
         _signal("Ley Choon", "Engineer Associate"),
@@ -107,37 +106,28 @@ def test_same_company_roles_share_company_discovery_and_batch_official_search(mo
     queries: list[str] = []
     fetched_urls: list[str] = []
 
-    def fake_search(query: str, max_results: int = 10):
+    def fake_search(query: str, max_results: int = 8):
         queries.append(query)
-        if query == '"Ley Choon" careers jobs Singapore':
-            return [
-                SearchResult(
-                    title="Ley Choon Careers",
-                    url="https://careers.leychoon.com/jobs",
-                    snippet="Ley Choon careers and vacancies",
-                )
-            ]
-        if query.startswith("site:careers.leychoon.com") and " OR " in query:
-            return [
-                SearchResult(
-                    title=signal.role_title,
-                    url=f"https://careers.leychoon.com/job/{index}",
-                    snippet=f"Ley Choon {signal.role_title} Singapore",
-                )
-                for index, signal in enumerate(signals, start=1)
-            ]
+        for index, signal in enumerate(signals, start=1):
+            if f'"{signal.role_title}"' in query:
+                return [
+                    SearchResult(
+                        title=f"{signal.role_title} - Ley Choon Careers",
+                        url=f"https://careers.leychoon.com/job/{index}",
+                        snippet=f"Ley Choon {signal.role_title} Singapore",
+                    )
+                ]
         return []
 
     def fake_fetch(url: str, timeout_seconds: float = 8.0):
         fetched_urls.append(url)
-        tail = url.rsplit("/", 1)[-1]
-        index = int(tail) - 1
+        index = int(url.rsplit("/", 1)[-1]) - 1
         signal = signals[index]
         return FetchedPage(
             requested_url=url,
             final_url=url,
             status_code=200,
-            title=signal.role_title,
+            title=f"{signal.role_title} - Ley Choon",
             text=_jd(signal.role_title),
         )
 
@@ -153,14 +143,12 @@ def test_same_company_roles_share_company_discovery_and_batch_official_search(mo
 
     assert len(outcome.job_records) == 3
     assert all(job.jd_status == "fetched_official" for job in outcome.job_records)
-    assert queries.count('"Ley Choon" careers jobs Singapore') == 1
-    assert sum(1 for query in queries if " OR " in query) == 1
-    assert not any("linkedin.com/jobs" in query.lower() for query in queries)
-    assert outcome.search_calls == 2
-    # The careers landing page discovers the host only. It is never fetched or
-    # mislabeled as a role's primary source; only the three exact job pages fetch.
+    assert outcome.search_calls == 3
     assert outcome.fetch_calls == 3
-    assert "https://careers.leychoon.com/jobs" not in fetched_urls
+    assert len(queries) == 3
+    assert all(" OR " not in query for query in queries)
+    assert not any("linkedin.com" in query.lower() for query in queries)
+    assert not any("greenhouse" in query.lower() for query in queries)
     assert set(fetched_urls) == {
         "https://careers.leychoon.com/job/1",
         "https://careers.leychoon.com/job/2",
@@ -168,54 +156,29 @@ def test_same_company_roles_share_company_discovery_and_batch_official_search(mo
     }
 
 
-def test_linkedin_runs_only_after_official_phase_does_not_produce_jd(monkeypatch) -> None:
+def test_unresolved_role_stops_after_single_exact_title_search(monkeypatch) -> None:
     signal = _signal("Example Robotics", "AI Engineer")
     queries: list[str] = []
+    fetches: list[str] = []
 
-    def fake_search(query: str, max_results: int = 10):
+    def fake_search(query: str, max_results: int = 8):
         queries.append(query)
-        if query == '"Example Robotics" careers jobs Singapore':
-            return [
-                SearchResult(
-                    title="Example Robotics Careers",
-                    url="https://careers.examplerobotics.com/jobs",
-                    snippet="Example Robotics careers",
-                )
-            ]
-        if query.startswith("site:careers.examplerobotics.com"):
-            return [
-                SearchResult(
-                    title="AI Engineer",
-                    url="https://careers.examplerobotics.com/job/ai-engineer",
-                    snippet="Example Robotics AI Engineer Singapore",
-                )
-            ]
-        if "site:linkedin.com/jobs" in query:
-            return [
-                SearchResult(
-                    title="AI Engineer - Example Robotics",
-                    url="https://www.linkedin.com/jobs/view/123",
-                    snippet="Example Robotics AI Engineer Singapore",
-                )
-            ]
-        return []
+        return [
+            SearchResult(
+                title="Example Robotics home page",
+                url="https://www.examplerobotics.com/",
+                snippet="Example Robotics products and services",
+            ),
+            SearchResult(
+                title="AI Engineer - Other Company",
+                url="https://careers.othercompany.com/job/ai-engineer",
+                snippet="Other Company AI Engineer",
+            ),
+        ]
 
     def fake_fetch(url: str, timeout_seconds: float = 8.0):
-        if "linkedin.com" in url:
-            return FetchedPage(
-                requested_url=url,
-                final_url=url,
-                status_code=200,
-                title="AI Engineer - Example Robotics",
-                text=_jd("AI Engineer", "Example Robotics"),
-            )
-        return FetchedPage(
-            requested_url=url,
-            final_url=url,
-            status_code=200,
-            title="AI Engineer",
-            text="Example Robotics AI Engineer",
-        )
+        fetches.append(url)
+        raise AssertionError("irrelevant search results must not be fetched")
 
     monkeypatch.setattr(company_job_research, "search_public_web", fake_search)
     monkeypatch.setattr(company_job_research, "fetch_public_page", fake_fetch)
@@ -228,14 +191,17 @@ def test_linkedin_runs_only_after_official_phase_does_not_produce_jd(monkeypatch
     )
 
     job = outcome.job_records[0]
-    assert job.primary_source_url == "https://careers.examplerobotics.com/job/ai-engineer"
-    assert job.secondary_source_url == "https://www.linkedin.com/jobs/view/123"
-    assert job.jd_status == "fetched_secondary"
-    assert job.jd_source_url == job.secondary_source_url
-    assert any("site:linkedin.com/jobs" in query for query in queries)
+    assert job.jd_status == "unavailable"
+    assert job.primary_source_url is None
+    assert job.secondary_source_url is None
+    assert outcome.search_calls == 1
+    assert outcome.fetch_calls == 0
+    assert len(queries) == 1
+    assert queries[0] == '"Example Robotics" "AI Engineer" careers job'
+    assert fetches == []
 
 
-def test_official_closed_page_blocks_secondary_and_matching(monkeypatch) -> None:
+def test_official_closed_page_stops_without_search(monkeypatch) -> None:
     official = "https://careers.example.com/job/closed-role"
     signal = _signal("Example", "Graduate Engineer", [official])
     queries: list[str] = []
@@ -243,7 +209,7 @@ def test_official_closed_page_blocks_secondary_and_matching(monkeypatch) -> None
     monkeypatch.setattr(
         company_job_research,
         "search_public_web",
-        lambda query, max_results=10: queries.append(query) or [],
+        lambda query, max_results=8: queries.append(query) or [],
     )
     monkeypatch.setattr(
         company_job_research,

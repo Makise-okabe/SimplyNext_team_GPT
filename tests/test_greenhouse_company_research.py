@@ -4,14 +4,13 @@ from career_agent import company_job_research
 from career_agent.company_job_research import ResearchContext, research_company_jobs
 from career_agent.models.email import EmailMessage
 from career_agent.models.signal import OpportunitySignal
-from career_agent.tools.greenhouse import GreenhouseJob
 from career_agent.tools.web_fetch import FetchedPage
 from career_agent.tools.web_search import SearchResult
 
 
 def _email() -> EmailMessage:
     return EmailMessage(
-        message_id="m-greenhouse",
+        message_id="m-fast-path",
         sender_name="Goh Ze Li",
         sender_email="zeli.goh@nus.edu.sg",
         subject="Industry Opportunities",
@@ -24,7 +23,7 @@ def _signal(role: str) -> OpportunitySignal:
     return OpportunitySignal(
         source_type="outlook",
         source_name="Goh Ze Li",
-        source_message_id="m-greenhouse",
+        source_message_id="m-fast-path",
         source_date=datetime(2026, 8, 31, tzinfo=timezone.utc),
         company="Reolink",
         role_title=role,
@@ -42,40 +41,22 @@ def _jd(role: str) -> str:
     )
 
 
-def test_greenhouse_fallback_resolves_only_circulated_role(monkeypatch) -> None:
+def test_exact_title_search_can_resolve_official_ats_without_greenhouse_discovery(monkeypatch) -> None:
     circulated = _signal("Site Reliability Engineer")
     exact_url = "https://job-boards.greenhouse.io/reolink/jobs/123"
     queries: list[str] = []
 
-    def fake_search(query: str, max_results: int = 10):
+    def fake_search(query: str, max_results: int = 8):
         queries.append(query)
-        if "greenhouse" in query.lower():
-            return [
-                SearchResult(
-                    title="Reolink Jobs",
-                    url="https://job-boards.greenhouse.io/reolink",
-                    snippet="Reolink careers and open positions",
-                )
-            ]
-        return []
+        return [
+            SearchResult(
+                title="Site Reliability Engineer (SRE) - Reolink",
+                url=exact_url,
+                snippet="Reolink Site Reliability Engineer Singapore careers",
+            )
+        ]
 
     monkeypatch.setattr(company_job_research, "search_public_web", fake_search)
-    monkeypatch.setattr(
-        company_job_research,
-        "fetch_greenhouse_jobs",
-        lambda board_slug, timeout_seconds=8.0: [
-            GreenhouseJob(
-                title="Site Reliability Engineer (SRE)",
-                url=exact_url,
-                location="Singapore",
-            ),
-            GreenhouseJob(
-                title="Unrelated Product Designer",
-                url="https://job-boards.greenhouse.io/reolink/jobs/999",
-                location="Singapore",
-            ),
-        ],
-    )
     monkeypatch.setattr(
         company_job_research,
         "fetch_public_page",
@@ -99,6 +80,6 @@ def test_greenhouse_fallback_resolves_only_circulated_role(monkeypatch) -> None:
     assert job.jd_status == "fetched_official"
     assert job.primary_source_url == exact_url
     assert job.jd_source_url == exact_url
+    assert outcome.search_calls == 1
     assert outcome.fetch_calls == 1
-    assert any("greenhouse" in query.lower() for query in queries)
-    assert all("999" not in warning for warning in job.warnings)
+    assert queries == ['"Reolink" "Site Reliability Engineer" careers job']

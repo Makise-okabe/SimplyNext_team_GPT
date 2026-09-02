@@ -128,7 +128,7 @@ def main() -> None:
     print("Source received    :", getattr(goh, "received_at", None))
     print("Source message id  :", _short(goh.message_id, 120))
     print("Corpus chars       :", len(corpus))
-    print("\nExpected behavior: source link first → official exact role → ATS → LinkedIn fallback")
+    print("\nExpected behavior: source exact URL first → one exact-title web search → official JD or unavailable")
 
     missing = [
         requested
@@ -193,7 +193,7 @@ def main() -> None:
             print("     ", result.url)
 
     payload = {
-        "schema": "simplinext.track_b.live_check.v2",
+        "schema": "simplinext.track_b.live_check.v3",
         "companies_requested": companies,
         "source_subject": goh.subject,
         "source_received_at": str(getattr(goh, "received_at", None)),
@@ -204,7 +204,6 @@ def main() -> None:
         "roles": len(all_jobs),
         "web_search_calls": context.search_calls,
         "page_fetch_calls": context.fetch_calls,
-        "greenhouse_calls": context.greenhouse_calls,
         "search_trace": {
             query: [
                 {"title": item.title, "url": item.url, "snippet": item.snippet}
@@ -229,13 +228,9 @@ def main() -> None:
     print("Roles           :", len(all_jobs))
     print("Web searches    :", context.search_calls)
     print("Page fetches    :", context.fetch_calls)
-    print("Greenhouse API  :", context.greenhouse_calls)
     print(
         "Full JDs        :",
-        sum(
-            job.jd_status in {"fetched_official", "fetched_secondary"}
-            for job in all_jobs
-        ),
+        sum(job.jd_status == "fetched_official" for job in all_jobs),
     )
     print("Output          :", output)
 

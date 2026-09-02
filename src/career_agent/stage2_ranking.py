@@ -14,6 +14,8 @@ MAX_JOB_EVIDENCE_CHARS = 3500
 LLM_TIMEOUT_SECONDS = 45.0
 LLM_MAX_RETRIES = 1
 LLM_MODEL = "openai/gpt-oss-120b"
+STAGE2_BATCH_SIZE = 5
+MISSING_ASSESSMENT_SCORE_CAP = 60.0
 
 
 class SemanticAssessment(BaseModel):
@@ -41,6 +43,7 @@ class Stage2RankedJob:
     fit_label: str
     confidence: str
     evidence_level: str
+    semantic_assessed: bool
     why_match: str
     matched_evidence: tuple[str, ...]
     missing_or_weak_evidence: tuple[str, ...]
@@ -187,6 +190,36 @@ def _find_source_job(ranked: dict, jobs: list[dict]) -> dict:
     return matches[0] if matches else {}
 
 
+def _coerce_batch(value) -> SemanticAssessmentBatch:
+    if isinstance(value, SemanticAssessmentBatch):
+        return value
+    if isinstance(value, dict):
+        return SemanticAssessmentBatch.model_validate(value)
+    return SemanticAssessmentBatch.model_validate(value)
+
+
+def _assess_chunk(
+    *,
+    model,
+    resume_text: str,
+    student_profile: dict,
+    ranked_chunk: list[dict],
+    job_chunk: list[dict],
+) -> dict[int, SemanticAssessment]:
+    prompt = build_stage2_prompt(
+        resume_text=resume_text,
+        student_profile=student_profile,
+        stage1_top=ranked_chunk,
+        source_jobs=job_chunk,
+    )
+    batch = _coerce_batch(model.invoke(prompt))
+    found: dict[int, SemanticAssessment] = {}
+    for assessment in batch.assessments:
+        if 0 <= assessment.candidate_index < len(ranked_chunk):
+            found.setdefault(assessment.candidate_index, assessment)
+    return found
+
+
 def rerank_stage1(
     *,
     resume_text: str,
@@ -195,25 +228,56 @@ def rerank_stage1(
     stage1_rankings: list[dict],
     stage1_top_n: int = 20,
     llm=None,
+    batch_size: int = STAGE2_BATCH_SIZE,
 ) -> list[Stage2RankedJob]:
     selected = list(stage1_rankings[: max(stage1_top_n, 0)])
     source_jobs = [_find_source_job(item, all_jobs) for item in selected]
-    prompt = build_stage2_prompt(
-        resume_text=resume_text,
-        student_profile=student_profile,
-        stage1_top=selected,
-        source_jobs=source_jobs,
-    )
+    if not selected:
+        return []
 
     model = llm or _build_llm()
-    batch = model.invoke(prompt)
-    if isinstance(batch, dict):
-        batch = SemanticAssessmentBatch.model_validate(batch)
-
+    batch_size = max(1, int(batch_size))
     by_index: dict[int, SemanticAssessment] = {}
-    for assessment in batch.assessments:
-        if 0 <= assessment.candidate_index < len(selected):
-            by_index.setdefault(assessment.candidate_index, assessment)
+
+    for start in range(0, len(selected), batch_size):
+        ranked_chunk = selected[start : start + batch_size]
+        job_chunk = source_jobs[start : start + batch_size]
+
+        try:
+            found = _assess_chunk(
+                model=model,
+                resume_text=resume_text,
+                student_profile=student_profile,
+                ranked_chunk=ranked_chunk,
+                job_chunk=job_chunk,
+            )
+        except Exception:
+            found = {}
+
+        for local_index, assessment in found.items():
+            by_index.setdefault(start + local_index, assessment)
+
+        missing_local = [index for index in range(len(ranked_chunk)) if index not in found]
+        if not missing_local:
+            continue
+
+        retry_ranked = [ranked_chunk[index] for index in missing_local]
+        retry_jobs = [job_chunk[index] for index in missing_local]
+        try:
+            retry_found = _assess_chunk(
+                model=model,
+                resume_text=resume_text,
+                student_profile=student_profile,
+                ranked_chunk=retry_ranked,
+                job_chunk=retry_jobs,
+            )
+        except Exception:
+            retry_found = {}
+
+        for retry_local_index, assessment in retry_found.items():
+            if 0 <= retry_local_index < len(missing_local):
+                original_local = missing_local[retry_local_index]
+                by_index.setdefault(start + original_local, assessment)
 
     results: list[Stage2RankedJob] = []
     for index, (ranked, job) in enumerate(zip(selected, source_jobs)):
@@ -221,18 +285,20 @@ def rerank_stage1(
         stage1_score = float(ranked.get("score") or 0.0)
 
         if assessment is None:
-            semantic_score = stage1_score
-            final_score = round(stage1_score, 1)
+            semantic_score = min(stage1_score, MISSING_ASSESSMENT_SCORE_CAP)
+            final_score = round(semantic_score, 1)
             fit_label = "possible"
             confidence = "low"
-            why_match = "Semantic assessment was unavailable; retained the Stage-1 evidence score."
+            semantic_assessed = False
+            why_match = "Semantic assessment was unavailable after retry; this candidate is not treated as a validated final match."
             matched_evidence: tuple[str, ...] = ()
-            gaps = ("LLM semantic assessment missing",)
+            gaps = ("LLM semantic assessment missing after retry",)
         else:
             semantic_score = float(assessment.semantic_score)
             final_score = round(0.8 * semantic_score + 0.2 * stage1_score, 1)
             fit_label = assessment.fit_label
             confidence = assessment.confidence
+            semantic_assessed = True
             why_match = assessment.why_match.strip()
             matched_evidence = tuple(assessment.matched_evidence[:8])
             gaps = tuple(assessment.missing_or_weak_evidence[:8])
@@ -248,6 +314,7 @@ def rerank_stage1(
                 fit_label=fit_label,
                 confidence=confidence,
                 evidence_level=str(job.get("matching_evidence_level") or ranked.get("evidence_level") or "source_only"),
+                semantic_assessed=semantic_assessed,
                 why_match=why_match,
                 matched_evidence=matched_evidence,
                 missing_or_weak_evidence=gaps,
@@ -261,6 +328,7 @@ def rerank_stage1(
 
     results.sort(
         key=lambda item: (
+            not item.semantic_assessed,
             -item.final_score,
             {"high": 0, "medium": 1, "low": 2}.get(item.confidence, 3),
             item.company.lower(),

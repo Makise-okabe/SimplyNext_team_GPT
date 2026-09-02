@@ -20,6 +20,7 @@ from career_agent.models.job_record import JobRecord
 
 DEFAULT_INPUT = Path("data/job_records/latest_job_catalog.json")
 DEFAULT_OUTPUT = Path("data/job_records/latest_matching_candidates.json")
+STALE_RESEARCH_BASES = {"trusted_nus_email_web_unresolved"}
 
 
 def main() -> None:
@@ -28,6 +29,11 @@ def main() -> None:
     )
     parser.add_argument("--input", default=str(DEFAULT_INPUT))
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
+    parser.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="Allow export from a catalog produced by the retired pre-fast-path research logic.",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -38,6 +44,17 @@ def main() -> None:
 
     payload = json.loads(input_path.read_text(encoding="utf-8"))
     raw_jobs = payload.get("jobs", [])
+
+    stale_count = sum(
+        raw.get("research_basis") in STALE_RESEARCH_BASES
+        for raw in raw_jobs
+    )
+    if stale_count and not args.allow_stale:
+        raise RuntimeError(
+            f"Catalog is stale: {stale_count} job(s) were produced by the retired "
+            "pre-fast-path web research logic. Run `uv run python "
+            "scripts/run_all_job_research.py --scan 30` first, then export again."
+        )
 
     candidates = []
     for raw in raw_jobs:

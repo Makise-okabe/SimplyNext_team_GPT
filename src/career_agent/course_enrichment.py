@@ -87,6 +87,23 @@ def _save_cache(path: Path, cache: dict[str, dict]) -> None:
     path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _from_local_database(module_code: str) -> CourseEnrichment | None:
+    from career_agent.nusmods_database import lookup_course
+
+    stored = lookup_course(module_code)
+    if stored is None:
+        return None
+    return CourseEnrichment(
+        module_code=stored.module_code,
+        title=stored.title,
+        description=stored.description,
+        academic_year=stored.academic_year,
+        source_url=stored.source_url,
+        skills=stored.skills,
+        source_status="local_nusmods_db",
+    )
+
+
 def fetch_nusmods_course(
     module_code: str,
     *,
@@ -143,6 +160,13 @@ def enrich_courses(
 
     for raw_code in module_codes:
         code = normalize_module_code(raw_code)
+
+        if not refresh:
+            local = _from_local_database(code)
+            if local is not None:
+                results.append(local)
+                continue
+
         cached = cache.get(code)
         if cached and not refresh:
             results.append(

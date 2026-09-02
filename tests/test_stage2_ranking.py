@@ -17,7 +17,10 @@ class FakeLLM:
     def invoke(self, prompt):
         self.calls.append(prompt)
         if self.batches:
-            return self.batches.pop(0)
+            value = self.batches.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
         return SemanticAssessmentBatch(assessments=[])
 
 
@@ -80,6 +83,18 @@ def _jobs():
     ]
 
 
+def _assessment(index: int, score: float = 80) -> SemanticAssessment:
+    return SemanticAssessment(
+        candidate_index=index,
+        semantic_score=score,
+        fit_label="good",
+        why_match="Grounded fit.",
+        matched_evidence=[],
+        missing_or_weak_evidence=[],
+        confidence="medium",
+    )
+
+
 def test_stage2_batches_candidates_and_semantic_score_drives_order():
     llm = FakeLLM(
         [
@@ -129,32 +144,8 @@ def test_stage2_batches_candidates_and_semantic_score_drives_order():
 def test_stage2_retries_missing_assessment_and_restores_full_coverage():
     llm = FakeLLM(
         [
-            SemanticAssessmentBatch(
-                assessments=[
-                    SemanticAssessment(
-                        candidate_index=0,
-                        semantic_score=90,
-                        fit_label="strong",
-                        why_match="Strong technical fit.",
-                        matched_evidence=["Cadence"],
-                        missing_or_weak_evidence=[],
-                        confidence="medium",
-                    )
-                ]
-            ),
-            SemanticAssessmentBatch(
-                assessments=[
-                    SemanticAssessment(
-                        candidate_index=0,
-                        semantic_score=30,
-                        fit_label="weak",
-                        why_match="Role-family mismatch.",
-                        matched_evidence=[],
-                        missing_or_weak_evidence=["Job evidence is sparse"],
-                        confidence="low",
-                    )
-                ]
-            ),
+            SemanticAssessmentBatch(assessments=[_assessment(0, 90)]),
+            SemanticAssessmentBatch(assessments=[_assessment(0, 30)]),
         ]
     )
 
@@ -181,34 +172,10 @@ def test_stage2_recovers_whole_failed_batch_with_individual_retries():
         [
             SemanticAssessmentBatch(assessments=[]),
             *[
-                SemanticAssessmentBatch(
-                    assessments=[
-                        SemanticAssessment(
-                            candidate_index=0,
-                            semantic_score=80 - index,
-                            fit_label="good",
-                            why_match="Recovered individual assessment.",
-                            matched_evidence=[],
-                            missing_or_weak_evidence=[],
-                            confidence="medium",
-                        )
-                    ]
-                )
+                SemanticAssessmentBatch(assessments=[_assessment(0, 80 - index)])
                 for index in range(5)
             ],
-            SemanticAssessmentBatch(
-                assessments=[
-                    SemanticAssessment(
-                        candidate_index=0,
-                        semantic_score=70,
-                        fit_label="good",
-                        why_match="Final batch assessment.",
-                        matched_evidence=[],
-                        missing_or_weak_evidence=[],
-                        confidence="medium",
-                    )
-                ]
-            ),
+            SemanticAssessmentBatch(assessments=[_assessment(0, 70)]),
         ]
     )
 
@@ -224,6 +191,33 @@ def test_stage2_recovers_whole_failed_batch_with_individual_retries():
 
     assert len(llm.calls) == 7
     assert len(results) == 6
+    assert all(item.semantic_assessed for item in results)
+
+
+def test_stage2_rate_limit_retries_with_backoff_without_real_sleep():
+    class RateLimitError(Exception):
+        pass
+
+    llm = FakeLLM(
+        [
+            RateLimitError("rate limit exceeded"),
+            SemanticAssessmentBatch(assessments=[_assessment(0, 90), _assessment(1, 70)]),
+        ]
+    )
+    sleeps = []
+
+    results = rerank_stage1(
+        resume_text="technical resume",
+        student_profile=_student(),
+        all_jobs=_jobs(),
+        stage1_rankings=_stage1(),
+        batch_size=5,
+        llm=llm,
+        sleep_fn=sleeps.append,
+    )
+
+    assert len(llm.calls) == 2
+    assert sleeps == [stage2_ranking.STAGE2_RATE_LIMIT_FALLBACK_SECONDS]
     assert all(item.semantic_assessed for item in results)
 
 
@@ -259,18 +253,7 @@ def test_stage2_small_batches_use_multiple_calls_without_dropping_candidates():
     for size in (2, 2, 2):
         batches.append(
             SemanticAssessmentBatch(
-                assessments=[
-                    SemanticAssessment(
-                        candidate_index=index,
-                        semantic_score=80 - index,
-                        fit_label="good",
-                        why_match="Grounded fit.",
-                        matched_evidence=[],
-                        missing_or_weak_evidence=[],
-                        confidence="medium",
-                    )
-                    for index in range(size)
-                ]
+                assessments=[_assessment(index, 80 - index) for index in range(size)]
             )
         )
     llm = FakeLLM(batches)

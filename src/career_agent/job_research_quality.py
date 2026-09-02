@@ -14,6 +14,8 @@ AGGREGATOR_HOST_MARKERS = (
     "grabjobs.",
     "foundit.",
     "jooble.",
+    "builtin.com",
+    "expertini.com",
 )
 ATS_HOST_MARKERS = (
     "myworkdayjobs.com",

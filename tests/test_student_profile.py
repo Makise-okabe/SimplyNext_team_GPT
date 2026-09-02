@@ -64,7 +64,39 @@ def test_build_student_profile_separates_explicit_and_course_skills(monkeypatch)
     assert set(profile.course_derived_skills) <= set(profile.all_skills)
 
 
-def test_enrich_courses_uses_cache_without_network(tmp_path, monkeypatch) -> None:
+def test_enrich_courses_prefers_local_database_without_network(tmp_path, monkeypatch) -> None:
+    network_calls = []
+
+    def fake_local(code):
+        assert code == "CS3237"
+        return CourseEnrichment(
+            module_code=code,
+            title="Introduction to Internet of Things",
+            description="IoT embedded systems",
+            academic_year="2026-2027",
+            source_url="https://api.nusmods.com/example/CS3237",
+            skills=("iot", "embedded systems"),
+            source_status="local_nusmods_db",
+        )
+
+    def fake_fetch(code):
+        network_calls.append(code)
+        raise AssertionError("network fetch should not run when local DB has the course")
+
+    monkeypatch.setattr(course_enrichment, "_from_local_database", fake_local)
+    monkeypatch.setattr(course_enrichment, "fetch_nusmods_course", fake_fetch)
+
+    result = course_enrichment.enrich_courses(
+        ["CS3237"],
+        cache_path=tmp_path / "course_cache.json",
+    )
+
+    assert network_calls == []
+    assert result[0].source_status == "local_nusmods_db"
+    assert result[0].skills == ("iot", "embedded systems")
+
+
+def test_enrich_courses_uses_cache_after_local_database_miss(tmp_path, monkeypatch) -> None:
     calls = []
 
     def fake_fetch(code):
@@ -79,6 +111,7 @@ def test_enrich_courses_uses_cache_without_network(tmp_path, monkeypatch) -> Non
             source_status="fetched_nusmods",
         )
 
+    monkeypatch.setattr(course_enrichment, "_from_local_database", lambda code: None)
     monkeypatch.setattr(course_enrichment, "fetch_nusmods_course", fake_fetch)
     cache = tmp_path / "course_cache.json"
 

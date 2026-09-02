@@ -4,9 +4,6 @@ from urllib.parse import urlparse
 
 from career_agent.models.job_record import JobRecord
 
-# Public aggregators/mirrors are useful as secondary evidence or JD fallbacks, but
-# they must never be presented to the matching layer as employer-official primary
-# sources.
 AGGREGATOR_HOST_MARKERS = (
     "linkedin.com",
     "indeed.",
@@ -18,6 +15,8 @@ AGGREGATOR_HOST_MARKERS = (
     "grabjobs.",
     "foundit.",
     "jooble.",
+    "builtin.com",
+    "expertini.com",
 )
 
 
@@ -36,15 +35,12 @@ def is_aggregator_url(url: str | None) -> bool:
 
 
 def sanitize_job_sources(job: JobRecord) -> JobRecord:
-    """Remove obviously non-official primary labels before matching/export."""
+    """Remove third-party aggregators from employer-official source fields."""
     primary = job.primary_source_url
     secondary = job.secondary_source_url
 
     if is_aggregator_url(primary):
-        if secondary is None and primary and any(
-            marker in _host(primary)
-            for marker in ("linkedin.com", "indeed.", "jobstreet.", "jobsdb.")
-        ):
+        if secondary is None and primary:
             secondary = primary
         primary = None
 
@@ -62,7 +58,7 @@ def sanitize_job_sources(job: JobRecord) -> JobRecord:
 
 
 def is_matching_ready(job: JobRecord) -> bool:
-    """Only active/researchable jobs with a real fetched JD enter matching."""
+    """High-evidence matching input: active job with a fetched full JD."""
     if job.availability_status in {"expired_by_source_deadline", "closed_by_official"}:
         return False
     if job.jd_status not in {"fetched_official", "fetched_secondary"}:
@@ -70,3 +66,38 @@ def is_matching_ready(job: JobRecord) -> bool:
     if not job.jd_source_url:
         return False
     return len(job.jd_text.strip()) >= 500
+
+
+def is_matching_candidate(job: JobRecord) -> bool:
+    """Any active circulated job can enter matching, even without a full JD."""
+    if job.availability_status in {"expired_by_source_deadline", "closed_by_official"}:
+        return False
+    return bool((job.company or "").strip() and (job.title or "").strip())
+
+
+def matching_evidence_level(job: JobRecord) -> str:
+    if is_matching_ready(job):
+        return "full_jd"
+    if is_matching_candidate(job):
+        return "source_only"
+    return "inactive"
+
+
+def matching_input_text(job: JobRecord) -> str:
+    """Deterministic text handed to the later resume/JD matching LLM."""
+    if is_matching_ready(job):
+        return job.jd_text.strip()
+
+    parts = [
+        f"Company: {job.company or ''}",
+        f"Role: {job.title or ''}",
+    ]
+    if job.location:
+        parts.append(f"Location: {job.location}")
+    if job.opportunity_type:
+        parts.append(f"Opportunity type: {job.opportunity_type}")
+    if job.deadline_hint:
+        parts.append(f"Deadline: {job.deadline_hint}")
+    if job.source_evidence:
+        parts.append(f"Source evidence: {job.source_evidence}")
+    return "\n".join(parts).strip()

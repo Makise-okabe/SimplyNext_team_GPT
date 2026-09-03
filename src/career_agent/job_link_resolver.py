@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from career_agent.company_job_research import _company_match, _title_overlap
+from career_agent.company_job_research import _company_match
 from career_agent.job_research_quality import is_aggregator_url, is_plausible_official_url
 from career_agent.models.job_record import JobRecord
 from career_agent.tools.web_search import SearchResult
@@ -11,6 +12,53 @@ from career_agent.tools.web_search_aggregate import search_public_web_aggregated
 
 MIN_EXACT_TITLE_OVERLAP = 0.50
 MIN_PROBABLE_TITLE_OVERLAP = 0.22
+TITLE_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+TITLE_STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "role",
+    "position",
+    "hiring",
+    "career",
+    "careers",
+    "job",
+    "jobs",
+    "singapore",
+}
+MEANINGFUL_SHORT_TITLE_TOKENS = {
+    "ai",
+    "ml",
+    "ic",
+    "rf",
+    "it",
+    "qa",
+    "ui",
+    "ux",
+    "hr",
+    "3d",
+    "5g",
+}
+TITLE_TOKEN_CANONICAL = {
+    "engineers": "engineer",
+    "engineering": "engineer",
+    "developer": "develop",
+    "developers": "develop",
+    "development": "develop",
+    "developing": "develop",
+    "internship": "intern",
+    "internships": "intern",
+    "researcher": "research",
+    "researchers": "research",
+    "applications": "application",
+    "designing": "design",
+    "designer": "design",
+    "designers": "design",
+    "analytics": "analysis",
+    "analyst": "analysis",
+    "analysts": "analysis",
+}
 
 
 @dataclass(frozen=True)
@@ -20,6 +68,30 @@ class LinkResolution:
     confidence: str
     search_query: str | None
     candidate_count: int
+
+
+def _canonical_title_token(token: str) -> str:
+    token = token.lower()
+    return TITLE_TOKEN_CANONICAL.get(token, token)
+
+
+def _resolver_title_tokens(value: str | None) -> set[str]:
+    tokens: set[str] = set()
+    for raw in TITLE_TOKEN_PATTERN.findall((value or "").lower()):
+        if raw in TITLE_STOPWORDS:
+            continue
+        if len(raw) < 3 and raw not in MEANINGFUL_SHORT_TITLE_TOKENS and not raw.isdigit():
+            continue
+        tokens.add(_canonical_title_token(raw))
+    return tokens
+
+
+def _resolver_title_overlap(title: str | None, text: str) -> float:
+    source = _resolver_title_tokens(title)
+    if not source:
+        return 0.0
+    target = _resolver_title_tokens(text)
+    return len(source & target) / len(source)
 
 
 def _looks_job_like(url: str) -> bool:
@@ -68,7 +140,7 @@ def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str
     if not _company_match(job.company, metadata):
         return None
 
-    overlap = _title_overlap(job.title, metadata)
+    overlap = _resolver_title_overlap(job.title, metadata)
     official = is_plausible_official_url(result.url, job.company)
     secondary = is_aggregator_url(result.url)
     concrete = _looks_job_like(result.url)

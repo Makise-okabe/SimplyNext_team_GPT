@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,12 @@ QUERY_STOPWORDS = {
     "the", "and", "for", "with", "job", "jobs", "career", "careers",
     "role", "position", "singapore", "pte", "ltd", "limited", "private",
 }
+
+
+def stable_search_api_name() -> str | None:
+    """Return the configured stable web-search API, if any."""
+    load_dotenv()
+    return "tavily" if os.getenv("TAVILY_API_KEY", "").strip() else None
 
 
 def _unwrap_duckduckgo_url(href: str) -> str:
@@ -138,12 +145,6 @@ def _quoted_query_parts(query: str) -> list[str]:
 
 
 def _result_matches_quoted_query(result: SearchResult, query: str) -> bool:
-    """Reject obviously unrelated results for company + exact-title lookups.
-
-    This is intentionally applied only when the query contains at least two quoted
-    phrases, which is the Track B shape: "Company" "Exact Role Title" ....
-    Site-scoped and generic searches keep their existing behavior.
-    """
     parts = _quoted_query_parts(query)
     if len(parts) < 2:
         return True
@@ -210,6 +211,7 @@ def _append_result(
 
 
 def _search_tavily(query: str, max_results: int) -> list[SearchResult]:
+    load_dotenv()
     api_key = os.getenv("TAVILY_API_KEY", "").strip()
     if not api_key:
         return []
@@ -218,7 +220,7 @@ def _search_tavily(query: str, max_results: int) -> list[SearchResult]:
         json={
             "api_key": api_key,
             "query": query,
-            "search_depth": "basic",
+            "search_depth": "advanced",
             "max_results": max_results,
             "include_answer": False,
             "include_raw_content": False,

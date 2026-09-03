@@ -52,8 +52,8 @@ def main() -> None:
     parser.add_argument("--resume", required=True)
     parser.add_argument("--transcript", required=True)
     parser.add_argument("--jobs", default=str(DEFAULT_JOBS))
-    parser.add_argument("--web-primary", type=int, default=30)
-    parser.add_argument("--web-explore", type=int, default=5)
+    parser.add_argument("--web-primary", type=int, default=12)
+    parser.add_argument("--web-explore", type=int, default=3)
     parser.add_argument("--semantic-top", type=int, default=20)
     parser.add_argument("--top", type=int, default=10)
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
@@ -87,7 +87,7 @@ def main() -> None:
         f"course_skills={len(profile.course_derived_skills)} total_skills={len(profile.all_skills)}"
     )
 
-    print("[2/4] Rough-ranking email jobs, resolving links, and enriching evidence...")
+    print("[2/4] Rough-ranking all email jobs, then enriching only the strongest shortlist...")
     jobs = list((_load(Path(args.jobs)).get("jobs") or []))
     agent = run_opportunity_agent(
         student_profile=profile_payload,
@@ -185,6 +185,7 @@ def main() -> None:
     print()
     print("SIMPLYNEXT CAREER OPPORTUNITY AGENT")
     print(f"Email jobs          : {m.active_jobs}")
+    print(f"Web-enriched jobs   : {m.web_selected}")
     print(f"Resolved job links  : {m.links_resolved}/{m.web_selected}")
     print(f"Search fallbacks    : {fallback_only}")
     print(f"Full / partial JDs  : {m.full_jd} / {m.partial_jd}")

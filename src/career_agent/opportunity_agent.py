@@ -95,7 +95,7 @@ def run_opportunity_agent(
     jobs: list[dict],
     web_primary_count: int = 12,
     web_exploration_count: int = 3,
-    semantic_shortlist_count: int = 20,
+    semantic_shortlist_count: int = 5,
     related_company_count: int = 2,
     related_per_company: int = 1,
     progress=None,
@@ -159,6 +159,7 @@ def run_opportunity_agent(
         existing_jobs=final_payloads,
         max_companies=related_company_count,
         per_company=related_per_company,
+        main_shortlist_count=max(semantic_shortlist_count, 0),
     )
     enriched_related = [enrich_job_description(job) for job in related_records]
     related_payloads = [_matching_payload(job) for job in enriched_related]

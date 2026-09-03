@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
 from pypdf import PdfReader
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 from career_agent.opportunity_agent import run_opportunity_agent
 from career_agent.stage2_ranking import rerank_stage1
 from career_agent.student_profile import build_student_profile
+from career_agent.tools.web_search import stable_search_api_name
 
 DEFAULT_JOBS = Path("data/job_records/latest_matching_candidates.json")
 DEFAULT_OUTPUT = Path("data/matching/career_opportunity_agent.json")
@@ -45,6 +47,7 @@ def _job_lookup(jobs: list[dict]) -> dict[tuple[str, str], dict]:
 
 
 def main() -> None:
+    load_dotenv()
     parser = argparse.ArgumentParser(description="Run the SimplyNext Career Opportunity Agent v2.")
     parser.add_argument("--resume", required=True)
     parser.add_argument("--transcript", required=True)
@@ -55,6 +58,12 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=10)
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     args = parser.parse_args()
+
+    provider = stable_search_api_name()
+    print("SIMPLYNEXT SEARCH CONFIG")
+    print(f"Stable Search API : {provider or 'NOT configured'}")
+    print("Fallback Search   : Bing/DDG public scraping")
+    print()
 
     resume_path = Path(args.resume)
     transcript_path = Path(args.transcript)
@@ -89,10 +98,14 @@ def main() -> None:
         progress=print,
     )
     m = agent.metrics
+    fallback_only = sum(
+        1 for job in agent.jobs if job.get("search_resolution_status") == "search_fallback_only"
+    )
     print(
         "      web summary: "
         f"selected={m.web_selected} links={m.links_resolved}/{m.web_selected} "
-        f"official={m.official_links} secondary={m.secondary_links} unresolved={m.unresolved_links}"
+        f"official={m.official_links} secondary={m.secondary_links} "
+        f"fallback={fallback_only} unresolved={m.unresolved_links}"
     )
     print(f"      JD summary : full={m.full_jd} partial={m.partial_jd}")
 
@@ -125,6 +138,8 @@ def main() -> None:
                 "job_page_url": job.get("job_page_url") or item.application_url or item.official_job_url,
                 "job_page_kind": job.get("job_page_kind", "unresolved"),
                 "job_page_confidence": job.get("job_page_confidence", "low"),
+                "search_fallback_url": job.get("search_fallback_url"),
+                "search_resolution_status": job.get("search_resolution_status", "not_searched"),
                 "jd_status": job.get("jd_status", "unavailable"),
                 "source_key": job.get("source_key"),
             }
@@ -151,8 +166,13 @@ def main() -> None:
         "schema": "simplinext.career_opportunity_agent.v2",
         "resume_file": resume_path.name,
         "transcript_file": transcript_path.name,
+        "search": {
+            "stable_api": provider,
+            "fallback": "bing_ddg_public_scraping",
+        },
         "metrics": {
             **m.__dict__,
+            "search_fallback_only": fallback_only,
             "semantic_assessed": semantic_assessed,
             "semantic_shortlist": len(final),
         },
@@ -166,6 +186,7 @@ def main() -> None:
     print("SIMPLYNEXT CAREER OPPORTUNITY AGENT")
     print(f"Email jobs          : {m.active_jobs}")
     print(f"Resolved job links  : {m.links_resolved}/{m.web_selected}")
+    print(f"Search fallbacks    : {fallback_only}")
     print(f"Full / partial JDs  : {m.full_jd} / {m.partial_jd}")
     print(f"Semantic assessed   : {semantic_assessed}/{len(final)}")
     print(f"Related discoveries : {m.related_jobs_discovered}")
@@ -177,7 +198,12 @@ def main() -> None:
         print(f"    match    : {card['why_match']}")
         print(f"    evidence : {card['evidence_level']} / {card['jd_status']}")
         print(f"    page     : {card['job_page_kind']} / {card['job_page_confidence']}")
-        print(f"    URL      : {card['job_page_url'] or '<unresolved>'}")
+        if card["job_page_url"]:
+            print(f"    View Job : {card['job_page_url']}")
+        elif card["search_fallback_url"]:
+            print(f"    Find Job : {card['search_fallback_url']}")
+        else:
+            print("    Find Job : <unavailable>")
 
     if related_cards:
         print()

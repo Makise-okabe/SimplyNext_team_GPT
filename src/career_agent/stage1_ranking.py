@@ -26,6 +26,9 @@ class Stage1RankedJob:
     inferred_job_skills: tuple[str, ...]
     official_job_url: str | None
     application_url: str | None
+    job_page_url: str | None
+    job_page_kind: str
+    job_page_confidence: str
     source_subject: str | None
 
     def to_dict(self) -> dict:
@@ -50,6 +53,8 @@ def _job_skill_weight(skill: str, inferred: set[str]) -> float:
 def _confidence(evidence_level: str, job_skill_count: int, inferred_count: int) -> str:
     if evidence_level == "full_jd":
         return "high"
+    if evidence_level == "partial_jd":
+        return "medium"
     explicit_job_skills = job_skill_count - inferred_count
     if explicit_job_skills >= 2 or job_skill_count >= 4:
         return "medium"
@@ -59,15 +64,10 @@ def _confidence(evidence_level: str, job_skill_count: int, inferred_count: int) 
 def _score_cap(matched: set[str], job_skills: set[str]) -> float:
     if not matched:
         return 0.0
-
     substantive = matched - GENERIC_SKILLS
     generic_only = not substantive
-
     if generic_only:
-        if len(matched) == 1:
-            return 28.0
-        return 40.0
-
+        return 28.0 if len(matched) == 1 else 40.0
     if len(substantive) == 1:
         return 68.0 if len(job_skills) <= 2 else 62.0
     if len(substantive) == 2:
@@ -80,44 +80,31 @@ def _score_cap(matched: set[str], job_skills: set[str]) -> float:
 def rank_job(student_profile: dict, job: dict) -> Stage1RankedJob:
     explicit = {str(skill).lower() for skill in student_profile.get("explicit_skills", [])}
     course = {str(skill).lower() for skill in student_profile.get("course_derived_skills", [])}
-
     job_profile = build_job_skill_profile(job)
     job_skills = {skill.lower() for skill in job_profile.skills}
     inferred = {skill.lower() for skill in job_profile.inferred_skills}
-
     matched_resume = sorted(skill for skill in job_skills if skill in explicit)
     matched_course = sorted(skill for skill in job_skills if skill not in explicit and skill in course)
     matched = set(matched_resume) | set(matched_course)
     missing = sorted(skill for skill in job_skills if skill not in explicit and skill not in course)
 
-    # Sparse title-only profiles are uncertain. Treat a role as if it needs at
-    # least three substantive signals so one accidental overlap cannot become
-    # a near-perfect match.
     denominator = sum(_job_skill_weight(skill, inferred) for skill in job_skills)
     substantive_job_skills = job_skills - GENERIC_SKILLS
-    minimum_denominator = 1.8 if substantive_job_skills else 1.2
-    denominator = max(denominator, minimum_denominator)
-
-    numerator = 0.0
-    for skill in job_skills:
-        student_weight = _student_skill_weight(skill, explicit, course)
-        if student_weight <= 0:
-            continue
-        numerator += _job_skill_weight(skill, inferred) * student_weight
-
+    denominator = max(denominator, 1.8 if substantive_job_skills else 1.2)
+    numerator = sum(
+        _job_skill_weight(skill, inferred) * _student_skill_weight(skill, explicit, course)
+        for skill in job_skills
+        if _student_skill_weight(skill, explicit, course) > 0
+    )
     coverage = numerator / denominator if denominator else 0.0
-
     substantive_matches = matched - GENERIC_SKILLS
     generic_matches = matched & GENERIC_SKILLS
-    breadth_bonus = min(
-        10.0,
-        len(substantive_matches) * 2.2 + len(generic_matches) * 0.5,
-    )
-    raw_score = coverage * 90.0 + breadth_bonus
-    score = min(_score_cap(matched, job_skills), round(raw_score, 1))
+    breadth_bonus = min(10.0, len(substantive_matches) * 2.2 + len(generic_matches) * 0.5)
+    score = min(_score_cap(matched, job_skills), round(coverage * 90.0 + breadth_bonus, 1))
 
     evidence_level = str(job.get("matching_evidence_level") or job_profile.evidence_level)
     confidence = _confidence(evidence_level, len(job_skills), len(inferred))
+    job_page_url = job.get("job_page_url") or job.get("application_url") or job.get("official_job_url") or job.get("secondary_source_url")
 
     return Stage1RankedJob(
         company=str(job.get("company") or ""),
@@ -132,6 +119,9 @@ def rank_job(student_profile: dict, job: dict) -> Stage1RankedJob:
         inferred_job_skills=tuple(sorted(inferred)),
         official_job_url=job.get("official_job_url") or job.get("primary_source_url"),
         application_url=job.get("application_url"),
+        job_page_url=job_page_url,
+        job_page_kind=str(job.get("job_page_kind") or "unresolved"),
+        job_page_confidence=str(job.get("job_page_confidence") or "low"),
         source_subject=job.get("source_subject"),
     )
 

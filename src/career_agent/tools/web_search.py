@@ -11,6 +11,8 @@ import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
+load_dotenv()
+
 
 @dataclass(frozen=True)
 class SearchResult:
@@ -36,7 +38,6 @@ QUERY_STOPWORDS = {
 
 def stable_search_api_name() -> str | None:
     """Return the configured stable web-search API, if any."""
-    load_dotenv()
     return "tavily" if os.getenv("TAVILY_API_KEY", "").strip() else None
 
 
@@ -211,7 +212,6 @@ def _append_result(
 
 
 def _search_tavily(query: str, max_results: int) -> list[SearchResult]:
-    load_dotenv()
     api_key = os.getenv("TAVILY_API_KEY", "").strip()
     if not api_key:
         return []

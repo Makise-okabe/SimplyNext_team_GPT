@@ -53,21 +53,14 @@ SKILL_PATTERNS: dict[str, tuple[str, ...]] = {
     "quality/reliability": ("reliability", "quality engineer", "failure analysis"),
 }
 
-
 TITLE_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\b(ai|machine learning|ml)\b", re.I), ("python", "machine learning", "deep learning")),
     (re.compile(r"\bdata (analyst|science|scientist|intelligence)\b", re.I), ("python", "sql", "data analysis")),
-    (
-        re.compile(r"\b(backend|full[- ]?stack|software engineer|software development engineer|developer|front[- ]?end)\b", re.I),
-        ("software engineering", "programming"),
-    ),
+    (re.compile(r"\b(backend|full[- ]?stack|software engineer|software development engineer|developer|front[- ]?end)\b", re.I), ("software engineering", "programming")),
     (re.compile(r"\b(site reliability|sre|devops)\b", re.I), ("devops", "cloud", "software engineering", "programming")),
     (re.compile(r"\b(embedded|firmware)\b", re.I), ("embedded systems", "c/c++", "digital design")),
     (re.compile(r"\b(chip|ic design|semiconductor)\b", re.I), ("semiconductor", "digital design", "analog circuits", "eda/cadence")),
-    (
-        re.compile(r"\b(electrical|electronics|electronic|hardware)\b", re.I),
-        ("analog circuits", "digital design", "embedded systems", "signal processing"),
-    ),
+    (re.compile(r"\b(electrical|electronics|electronic|hardware)\b", re.I), ("analog circuits", "digital design", "embedded systems", "signal processing")),
     (re.compile(r"\b(power electronics|power engineer|power systems?)\b", re.I), ("power systems", "analog circuits")),
     (re.compile(r"\b(fpga|rtl|verilog|digital design)\b", re.I), ("digital design", "verilog/hdl", "fpga")),
     (re.compile(r"\b(photonics|optical|optoelectronic)\b", re.I), ("photonics", "semiconductor")),
@@ -82,9 +75,7 @@ TITLE_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\b(accountant|accounting|tax)\b", re.I), ("accounting", "excel", "data analysis")),
 )
 
-ALIASES = {
-    "git": "software engineering",
-}
+ALIASES = {"git": "software engineering"}
 
 
 def _normalize_text(text: str | None) -> str:
@@ -158,7 +149,7 @@ def build_job_skill_profile(job: dict) -> JobSkillProfile:
     source_evidence = str(job.get("source_evidence") or "")
     matching_input = str(job.get("matching_input_text") or "")
 
-    if evidence_level == "full_jd" and jd_text.strip():
+    if evidence_level in {"full_jd", "partial_jd"} and jd_text.strip():
         evidence_text = jd_text
     elif source_evidence.strip():
         evidence_text = source_evidence
@@ -169,7 +160,6 @@ def build_job_skill_profile(job: dict) -> JobSkillProfile:
     title_inferred = infer_title_skills(title)
     skills = explicit | title_inferred
     inferred_only = title_inferred - explicit
-
     return JobSkillProfile(
         company=company,
         title=title,
@@ -197,20 +187,13 @@ def score_match(student: StudentSkillProfile, job: JobSkillProfile) -> MatchResu
     job_skills = set(job.skills)
     matched = student_skills & job_skills
     missing = job_skills - student_skills
-
-    if job_skills:
-        coverage = len(matched) / len(job_skills)
-        score = round(100.0 * coverage, 1)
-    else:
-        score = 0.0
-
+    score = round(100.0 * len(matched) / len(job_skills), 1) if job_skills else 0.0
     if job.evidence_level == "full_jd":
         confidence = "high"
-    elif len(job.evidence_text) >= 120 or len(job_skills) >= 3:
+    elif job.evidence_level == "partial_jd" or len(job.evidence_text) >= 120 or len(job_skills) >= 3:
         confidence = "medium"
     else:
         confidence = "low"
-
     return MatchResult(
         company=job.company,
         title=job.title,

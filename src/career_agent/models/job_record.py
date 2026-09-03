@@ -12,6 +12,8 @@ from career_agent.models.signal import OpportunitySignal, OpportunityType
 JDStatus = Literal[
     "fetched_official",
     "fetched_secondary",
+    "partial_official",
+    "partial_secondary",
     "source_context_only",
     "unavailable",
 ]
@@ -21,6 +23,15 @@ AvailabilityStatus = Literal[
     "closed_by_official",
     "unknown",
 ]
+JobPageKind = Literal[
+    "official_exact",
+    "official_probable",
+    "secondary_exact",
+    "secondary_probable",
+    "company_careers",
+    "unresolved",
+]
+JobPageConfidence = Literal["high", "medium", "low"]
 
 
 class SourceDocument(BaseModel):
@@ -31,11 +42,19 @@ class SourceDocument(BaseModel):
 
 
 class JobRecord(BaseModel):
-    """Research-complete job contract consumed by the matching agent."""
+    """Canonical job contract consumed by the career-opportunity agent.
 
-    # Canonical source tag lets the later matching/ranking agent keep provenance
-    # without reopening the original Outlook message.
-    source_key: Literal["goh_ze_li", "talentconnect", "unknown"] = "unknown"
+    Page resolution and JD evidence are intentionally separate. A role can have a
+    useful clickable job page even when the page is dynamic, protected, or too
+    sparse to yield a full job description.
+    """
+
+    source_key: Literal[
+        "goh_ze_li",
+        "talentconnect",
+        "web_discovered",
+        "unknown",
+    ] = "unknown"
     source_message_id: str
     source_sender_email: str | None = None
     source_subject: str
@@ -56,13 +75,16 @@ class JobRecord(BaseModel):
     research_confidence: Literal["high", "medium", "low"] = "low"
     research_basis: str = "none"
 
-    # Source hierarchy for downstream matching/explanations. The primary source
-    # is always employer/ATS when known. A secondary mirror may supply the JD when
-    # an official page is dynamic or otherwise unreadable.
+    # Legacy/source-hierarchy fields retained for backward compatibility.
     primary_source_url: str | None = None
     secondary_source_url: str | None = None
     official_job_url: str | None = None
     application_url: str | None = None
+
+    # UI-facing page resolution. This is independent from JD extraction.
+    job_page_url: str | None = None
+    job_page_kind: JobPageKind = "unresolved"
+    job_page_confidence: JobPageConfidence = "low"
 
     jd_status: JDStatus = "unavailable"
     jd_source_url: str | None = None

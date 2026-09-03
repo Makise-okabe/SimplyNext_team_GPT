@@ -78,13 +78,15 @@ def _same_company_existing_roles(
     student_profile: dict,
     existing_jobs: list[dict],
     per_company: int,
+    excluded_keys: set[tuple[str, str]],
 ) -> list[JobRecord]:
     candidates: list[tuple[float, dict]] = []
     anchor_key = _job_key(company, anchor_title)
     for raw in existing_jobs:
+        key = _job_key(raw.get("company"), raw.get("title"))
         if _normalize(raw.get("company")) != _normalize(company):
             continue
-        if _job_key(raw.get("company"), raw.get("title")) == anchor_key:
+        if key == anchor_key or key in excluded_keys:
             continue
         if str(raw.get("availability_status") or "") in {"expired_by_source_deadline", "closed_by_official"}:
             continue
@@ -140,11 +142,17 @@ def discover_related_jobs(
     existing_jobs: list[dict],
     max_companies: int = 4,
     per_company: int = 2,
+    main_shortlist_count: int = 5,
 ) -> tuple[list[JobRecord], RelatedDiscoveryMetrics]:
-    """Recommend same-company alternatives, then lightly search official roles if needed."""
+    """Recommend alternatives outside the main shortlist, then lightly search if needed."""
     existing_keys = {_job_key(job.get("company"), job.get("title")) for job in existing_jobs}
+    excluded_keys = {
+        _job_key(item.get("company"), item.get("title"))
+        for item in top_rankings[: max(main_shortlist_count, 0)]
+    }
+
     companies: list[tuple[str, str]] = []
-    for item in top_rankings:
+    for item in top_rankings[: max(main_shortlist_count, max_companies)]:
         company = str(item.get("company") or "").strip()
         title = str(item.get("title") or "").strip()
         if company and all(_normalize(company) != _normalize(existing[0]) for existing in companies):
@@ -186,6 +194,7 @@ def discover_related_jobs(
             student_profile=student_profile,
             existing_jobs=existing_jobs,
             per_company=per_company,
+            excluded_keys=excluded_keys,
         )
         for record in same_company:
             key = _job_key(record.company, record.title)
@@ -217,7 +226,9 @@ def discover_related_jobs(
                 continue
 
             key = _job_key(company, title)
-            if key in existing_keys or key in {_job_key(item.company, item.title) for item in discovered}:
+            if key in existing_keys or key in excluded_keys or key in {
+                _job_key(item.company, item.title) for item in discovered
+            }:
                 continue
 
             title_skills = {skill.lower() for skill in infer_title_skills(title)}

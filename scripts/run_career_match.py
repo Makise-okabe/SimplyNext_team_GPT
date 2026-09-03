@@ -48,7 +48,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Run SimplyNext profile building, broad deterministic matching, "
-            "official-web shortlist enrichment, and semantic reranking."
+            "grounded web shortlist enrichment, and semantic reranking."
         )
     )
     parser.add_argument("--resume", required=True)
@@ -104,9 +104,9 @@ def main() -> None:
     enriched_jobs = jobs
     enrichment_metrics = None
     if args.skip_web_enrichment:
-        print("[3/4] Skipping official-web shortlist enrichment...")
+        print("[3/4] Skipping web shortlist enrichment...")
     else:
-        print("[3/4] Enriching Stage-1 shortlist from official web...")
+        print("[3/4] Enriching Stage-1 shortlist from grounded public web evidence...")
         enriched_jobs, enrichment_metrics = enrich_stage1_shortlist(
             all_jobs=jobs,
             stage1_rankings=stage1_payload["rankings"],
@@ -114,12 +114,14 @@ def main() -> None:
             progress=print,
         )
         enriched_payload = {
-            "schema": "simplinext.enriched_matching_candidates.v1",
+            "schema": "simplinext.enriched_matching_candidates.v2",
             "source": str(args.jobs),
             "selected": enrichment_metrics.selected,
             "already_full_jd": enrichment_metrics.already_full_jd,
             "researched": enrichment_metrics.researched,
             "upgraded_to_full_jd": enrichment_metrics.upgraded_to_full_jd,
+            "upgraded_official": enrichment_metrics.upgraded_official,
+            "upgraded_secondary": enrichment_metrics.upgraded_secondary,
             "closed_by_official": enrichment_metrics.closed_by_official,
             "still_source_only": enrichment_metrics.still_source_only,
             "web_search_calls": enrichment_metrics.search_calls,
@@ -132,6 +134,8 @@ def main() -> None:
             f"selected={enrichment_metrics.selected} "
             f"already_full_jd={enrichment_metrics.already_full_jd} "
             f"upgraded={enrichment_metrics.upgraded_to_full_jd} "
+            f"(official={enrichment_metrics.upgraded_official}, "
+            f"secondary={enrichment_metrics.upgraded_secondary}) "
             f"closed={enrichment_metrics.closed_by_official} "
             f"source_only={enrichment_metrics.still_source_only}"
         )
@@ -140,8 +144,6 @@ def main() -> None:
             f"fetches={enrichment_metrics.fetch_calls}"
         )
 
-        # Re-run deterministic ranking because full-JD evidence can change skill
-        # extraction, evidence confidence, and shortlist ordering.
         reranked = rank_jobs(profile_payload, enriched_jobs)
         stage1_payload = {
             **stage1_payload,
@@ -178,6 +180,8 @@ def main() -> None:
                 "already_full_jd": enrichment_metrics.already_full_jd,
                 "researched": enrichment_metrics.researched,
                 "upgraded_to_full_jd": enrichment_metrics.upgraded_to_full_jd,
+                "upgraded_official": enrichment_metrics.upgraded_official,
+                "upgraded_secondary": enrichment_metrics.upgraded_secondary,
                 "closed_by_official": enrichment_metrics.closed_by_official,
                 "still_source_only": enrichment_metrics.still_source_only,
                 "search_calls": enrichment_metrics.search_calls,
@@ -198,8 +202,9 @@ def main() -> None:
     if enrichment_metrics is not None:
         print(
             "Full-JD upgrades :",
-            f"{enrichment_metrics.upgraded_to_full_jd} "
-            f"(+{enrichment_metrics.already_full_jd} already available)",
+            enrichment_metrics.upgraded_to_full_jd,
+            f"(official={enrichment_metrics.upgraded_official}, secondary={enrichment_metrics.upgraded_secondary}, "
+            f"+{enrichment_metrics.already_full_jd} already available)",
         )
     print("Top shown        :", top_n)
     print("Output           :", args.output)

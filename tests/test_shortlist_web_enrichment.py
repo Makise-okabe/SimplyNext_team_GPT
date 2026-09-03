@@ -1,6 +1,8 @@
 from career_agent import shortlist_web_enrichment
 from career_agent.company_job_research import CompanyResearchOutcome
 from career_agent.shortlist_web_enrichment import enrich_stage1_shortlist
+from career_agent.tools.web_fetch import FetchedPage
+from career_agent.tools.web_search import SearchResult
 
 
 def _job(company: str, title: str, *, source_evidence: str = "email evidence") -> dict:
@@ -86,4 +88,69 @@ def test_enrichment_only_researches_stage1_shortlist_and_upgrades_full_jd(monkey
     assert metrics.selected == 1
     assert metrics.researched == 1
     assert metrics.upgraded_to_full_jd == 1
+    assert metrics.upgraded_official == 1
+    assert metrics.upgraded_secondary == 0
+    assert metrics.still_source_only == 0
+
+
+def test_secondary_fallback_upgrades_jd_without_claiming_official_source(monkeypatch):
+    jobs = [_job("Goldilock", "Embedded Software Engineer")]
+    stage1 = [{"company": "Goldilock", "title": "Embedded Software Engineer", "score": 90.0}]
+
+    def unresolved_official(*, email, source_key, company_items, context, progress=None):
+        original = shortlist_web_enrichment._record(jobs[0])
+        return CompanyResearchOutcome(
+            job_records=[original],
+            search_calls=1,
+            fetch_calls=0,
+            warnings=[],
+            errors=[],
+        )
+
+    monkeypatch.setattr(shortlist_web_enrichment, "research_company_jobs", unresolved_official)
+
+    secondary_url = "https://www.linkedin.com/jobs/view/123"
+
+    def fake_search(self, query):
+        self.search_calls += 1
+        return [
+            SearchResult(
+                title="Embedded Software Engineer - Goldilock",
+                url=secondary_url,
+                snippet="Goldilock Embedded Software Engineer Singapore responsibilities requirements",
+            )
+        ]
+
+    def fake_fetch(self, url):
+        self.fetch_calls += 1
+        return FetchedPage(
+            requested_url=url,
+            final_url=url,
+            status_code=200,
+            title="Embedded Software Engineer - Goldilock",
+            text=(
+                "Goldilock Embedded Software Engineer Singapore\n"
+                "Responsibilities\n"
+                + ("Develop embedded software in C and C++ for hardware products. " * 20)
+                + "\nRequirements\nDegree in electrical engineering or computer engineering."
+            ),
+        )
+
+    monkeypatch.setattr(shortlist_web_enrichment.ResearchContext, "search", fake_search)
+    monkeypatch.setattr(shortlist_web_enrichment.ResearchContext, "fetch", fake_fetch)
+
+    enriched, metrics = enrich_stage1_shortlist(
+        all_jobs=jobs,
+        stage1_rankings=stage1,
+        stage1_top_n=1,
+    )
+
+    goldilock = enriched[0]
+    assert goldilock["matching_evidence_level"] == "full_jd"
+    assert goldilock["jd_status"] == "fetched_secondary"
+    assert goldilock["secondary_source_url"] == secondary_url
+    assert goldilock["official_job_url"] is None
+    assert metrics.upgraded_to_full_jd == 1
+    assert metrics.upgraded_official == 0
+    assert metrics.upgraded_secondary == 1
     assert metrics.still_source_only == 0

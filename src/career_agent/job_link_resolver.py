@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 from career_agent.company_job_research import _company_match
 from career_agent.job_research_quality import is_aggregator_url, is_plausible_official_url
@@ -14,31 +14,11 @@ MIN_EXACT_TITLE_OVERLAP = 0.50
 MIN_PROBABLE_TITLE_OVERLAP = 0.22
 TITLE_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 TITLE_STOPWORDS = {
-    "the",
-    "and",
-    "for",
-    "with",
-    "role",
-    "position",
-    "hiring",
-    "career",
-    "careers",
-    "job",
-    "jobs",
-    "singapore",
+    "the", "and", "for", "with", "role", "position", "hiring",
+    "career", "careers", "job", "jobs", "singapore",
 }
 MEANINGFUL_SHORT_TITLE_TOKENS = {
-    "ai",
-    "ml",
-    "ic",
-    "rf",
-    "it",
-    "qa",
-    "ui",
-    "ux",
-    "hr",
-    "3d",
-    "5g",
+    "ai", "ml", "ic", "rf", "it", "qa", "ui", "ux", "hr", "3d", "5g",
 }
 TITLE_TOKEN_CANONICAL = {
     "engineers": "engineer",
@@ -71,8 +51,7 @@ class LinkResolution:
 
 
 def _canonical_title_token(token: str) -> str:
-    token = token.lower()
-    return TITLE_TOKEN_CANONICAL.get(token, token)
+    return TITLE_TOKEN_CANONICAL.get(token.lower(), token.lower())
 
 
 def _resolver_title_tokens(value: str | None) -> set[str]:
@@ -103,29 +82,11 @@ def _looks_job_like(url: str) -> bool:
     return any(
         marker in value
         for marker in (
-            "/job/",
-            "/jobs/",
-            "jobdetail",
-            "job-detail",
-            "jobid=",
-            "job_id=",
-            "jobcode=",
-            "requisition",
-            "reqid=",
-            "/position/",
-            "/positions/",
-            "/opening/",
-            "/openings/",
-            "greenhouse",
-            "lever.co",
-            "myworkdayjobs",
-            "workdayjobs",
-            "smartrecruiters",
-            "successfactors",
-            "employmenthero",
-            "linkedin.com/jobs/view",
-            "jobstreet",
-            "indeed.",
+            "/job/", "/jobs/", "jobdetail", "job-detail", "jobid=", "job_id=",
+            "jobcode=", "requisition", "reqid=", "/position/", "/positions/",
+            "/opening/", "/openings/", "greenhouse", "lever.co", "myworkdayjobs",
+            "workdayjobs", "smartrecruiters", "successfactors", "employmenthero",
+            "linkedin.com/jobs/view", "jobstreet", "indeed.",
         )
     )
 
@@ -201,8 +162,13 @@ def _queries(company: str, title: str) -> list[str]:
     ]
 
 
+def _search_fallback_url(company: str, title: str) -> str:
+    query = f'"{company}" "{title}" jobs'
+    return f"https://www.google.com/search?q={quote_plus(query)}"
+
+
 def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
-    """Resolve the best clickable job page without requiring a fetchable JD."""
+    """Resolve a concrete job page; otherwise attach an explicit search fallback."""
     existing = _existing_resolution(job)
     if existing is not None:
         return _apply_resolution(job, existing), existing
@@ -211,7 +177,7 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
     title = (job.title or "").strip()
     if not company or not title:
         unresolved = LinkResolution(None, "unresolved", "low", None, 0)
-        return job, unresolved
+        return job.model_copy(update={"search_resolution_status": "not_searched"}), unresolved
 
     queries = _queries(company, title)
     scored_results: list[tuple[float, SearchResult, str, str, str]] = []
@@ -235,7 +201,16 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
 
     if not scored_results:
         unresolved = LinkResolution(None, "unresolved", "low", queries[0], 0)
-        return job, unresolved
+        fallback = _search_fallback_url(company, title)
+        return job.model_copy(
+            update={
+                "job_page_url": None,
+                "job_page_kind": "unresolved",
+                "job_page_confidence": "low",
+                "search_fallback_url": fallback,
+                "search_resolution_status": "search_fallback_only",
+            }
+        ), unresolved
 
     scored_results.sort(key=lambda item: item[0], reverse=True)
     _, best, kind, confidence, query = scored_results[0]
@@ -263,6 +238,7 @@ def _apply_resolution(job: JobRecord, resolution: LinkResolution) -> JobRecord:
         "job_page_url": resolution.url,
         "job_page_kind": resolution.kind,
         "job_page_confidence": resolution.confidence,
+        "search_resolution_status": "resolved_job_page",
     }
     if resolution.kind.startswith("official"):
         update["primary_source_url"] = resolution.url

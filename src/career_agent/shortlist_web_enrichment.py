@@ -3,13 +3,29 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from career_agent.company_job_research import ResearchContext, research_company_jobs
+from career_agent.company_job_research import (
+    MIN_JD_CHARS,
+    MIN_JD_TITLE_OVERLAP,
+    ResearchContext,
+    _company_match,
+    _title_overlap,
+    research_company_jobs,
+)
+from career_agent.job_research_quality import (
+    clean_jd_text,
+    is_aggregator_url,
+    is_plausible_official_url,
+    page_is_closed,
+)
 from career_agent.matching_dataset import matching_evidence_level, matching_input_text
 from career_agent.models.email import EmailMessage
 from career_agent.models.job_record import JobRecord
 from career_agent.models.signal import OpportunitySignal
+from career_agent.tools.web_search import SearchResult
 
 ProgressCallback = Callable[[str], None]
+MAX_SECONDARY_FETCH_CANDIDATES = 3
+MIN_SECONDARY_SEARCH_TITLE_OVERLAP = 0.45
 
 
 @dataclass(frozen=True)
@@ -18,6 +34,8 @@ class ShortlistWebEnrichmentMetrics:
     already_full_jd: int
     researched: int
     upgraded_to_full_jd: int
+    upgraded_official: int
+    upgraded_secondary: int
     closed_by_official: int
     still_source_only: int
     search_calls: int
@@ -97,6 +115,8 @@ def _merge(original: JobRecord, researched: JobRecord) -> JobRecord:
     if researched.primary_source_url:
         update["primary_source_url"] = researched.primary_source_url
         update["official_job_url"] = researched.official_job_url or researched.primary_source_url
+    if researched.secondary_source_url:
+        update["secondary_source_url"] = researched.secondary_source_url
 
     if researched.availability_status == "closed_by_official":
         update.update(
@@ -107,14 +127,14 @@ def _merge(original: JobRecord, researched: JobRecord) -> JobRecord:
                 "research_basis": researched.research_basis,
             }
         )
-    elif researched.jd_status == "fetched_official" and researched.jd_text.strip():
+    elif researched.jd_status in {"fetched_official", "fetched_secondary"} and researched.jd_text.strip():
         update.update(
             {
                 "availability_status": researched.availability_status,
                 "research_status": researched.research_status,
                 "research_confidence": researched.research_confidence,
                 "research_basis": researched.research_basis,
-                "jd_status": "fetched_official",
+                "jd_status": researched.jd_status,
                 "jd_source_url": researched.jd_source_url,
                 "jd_text": researched.jd_text,
             }
@@ -130,6 +150,138 @@ def _matching_payload(job: JobRecord) -> dict:
     return payload
 
 
+def _result_text(result: SearchResult) -> str:
+    return f"{result.title} {result.snippet} {result.url}"
+
+
+def _rank_secondary_candidates(job: JobRecord, results: list[SearchResult]) -> list[SearchResult]:
+    scored: list[tuple[float, SearchResult]] = []
+    for result in results:
+        value = _result_text(result)
+        overlap = _title_overlap(job.title, value)
+        if overlap < MIN_SECONDARY_SEARCH_TITLE_OVERLAP:
+            continue
+        if not _company_match(job.company, value):
+            continue
+
+        official = is_plausible_official_url(result.url, job.company)
+        secondary = is_aggregator_url(result.url) or not official
+        if not official and not secondary:
+            continue
+
+        score = overlap * 100.0
+        if official:
+            score += 30.0
+        elif is_aggregator_url(result.url):
+            score += 10.0
+        scored.append((score, result))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    seen: set[str] = set()
+    ranked: list[SearchResult] = []
+    for _, result in scored:
+        if result.url in seen:
+            continue
+        seen.add(result.url)
+        ranked.append(result)
+    return ranked
+
+
+def _usable_secondary_jd(job: JobRecord, page) -> str | None:
+    value = f"{page.title}\n{page.text}"
+    if not _company_match(job.company, value):
+        return None
+    cleaned = clean_jd_text(page.text)
+    if len(cleaned.strip()) < MIN_JD_CHARS:
+        return None
+    if _title_overlap(job.title, cleaned) < MIN_JD_TITLE_OVERLAP:
+        return None
+    return cleaned[:30_000]
+
+
+def _secondary_fallback(job: JobRecord, context: ResearchContext) -> JobRecord | None:
+    """Use a verified public secondary JD only after official research fails.
+
+    Official employer/ATS pages remain preferred. Secondary pages are accepted
+    only when both search metadata and fetched page content match company/title.
+    A secondary page saying the listing is closed may still supply historical JD
+    evidence; it does not override the trusted NUS source's availability status.
+    """
+    company = job.company or ""
+    title = job.title or ""
+    queries = [
+        f'"{company}" "{title}" careers job',
+        f'"{company}" "{title}"',
+    ]
+
+    tried: set[str] = set()
+    for query in queries:
+        results = context.search(query)
+        candidates = _rank_secondary_candidates(job, results)
+        for result in candidates[:MAX_SECONDARY_FETCH_CANDIDATES]:
+            if result.url in tried:
+                continue
+            tried.add(result.url)
+            page = context.fetch(result.url)
+            if page is None:
+                continue
+
+            final_url = page.final_url or result.url
+            official = is_plausible_official_url(final_url, job.company)
+            if official and page_is_closed(page.text):
+                continue
+
+            cleaned = _usable_secondary_jd(job, page)
+            if not cleaned:
+                continue
+
+            if official:
+                return job.model_copy(
+                    update={
+                        "availability_status": job.availability_status,
+                        "research_status": "verified_exact_job",
+                        "research_confidence": "high",
+                        "research_basis": "official_company_or_ats_page_broad_search",
+                        "primary_source_url": final_url,
+                        "official_job_url": final_url,
+                        "application_url": job.application_url or final_url,
+                        "jd_status": "fetched_official",
+                        "jd_source_url": final_url,
+                        "jd_text": cleaned,
+                        "evidence_summary": list(
+                            dict.fromkeys(
+                                [
+                                    *job.evidence_summary,
+                                    "official employer/ATS page matched the shortlisted role",
+                                ]
+                            )
+                        ),
+                    }
+                )
+
+            return job.model_copy(
+                update={
+                    "availability_status": job.availability_status,
+                    "research_status": "verified_exact_job",
+                    "research_confidence": "medium",
+                    "research_basis": "verified_secondary_job_page",
+                    "secondary_source_url": final_url,
+                    "jd_status": "fetched_secondary",
+                    "jd_source_url": final_url,
+                    "jd_text": cleaned,
+                    "evidence_summary": list(
+                        dict.fromkeys(
+                            [
+                                *job.evidence_summary,
+                                "verified public secondary page matched company and role title",
+                            ]
+                        )
+                    ),
+                }
+            )
+    return None
+
+
 def enrich_stage1_shortlist(
     *,
     all_jobs: list[dict],
@@ -137,11 +289,12 @@ def enrich_stage1_shortlist(
     stage1_top_n: int = 20,
     progress: ProgressCallback | None = None,
 ) -> tuple[list[dict], ShortlistWebEnrichmentMetrics]:
-    """Upgrade only the Stage-1 shortlist with official web evidence.
+    """Upgrade only the Stage-1 shortlist with grounded public web evidence.
 
-    The broad candidate pool remains deterministic and cheap. Web search/fetch is
-    reserved for shortlisted jobs, so a 137-job catalog does not trigger 137 web
-    research operations.
+    The broad candidate pool remains deterministic and cheap. Official employer/
+    ATS evidence is always attempted first. If no official JD is retrievable, a
+    company+title-verified secondary page may provide the JD while retaining clear
+    secondary provenance.
     """
     selected = list(stage1_rankings[: max(stage1_top_n, 0)])
     selected_keys = {_job_key(item.get("company"), item.get("title")) for item in selected}
@@ -151,6 +304,8 @@ def enrich_stage1_shortlist(
     researched_count = 0
     already_full_jd = 0
     upgraded = 0
+    upgraded_official = 0
+    upgraded_secondary = 0
     closed = 0
 
     updated_by_key: dict[tuple[str, str], JobRecord] = {}
@@ -181,6 +336,15 @@ def enrich_stage1_shortlist(
         )
         researched = outcome.job_records[0] if outcome.job_records else job
         merged = _merge(job, researched)
+
+        if (
+            merged.availability_status != "closed_by_official"
+            and matching_evidence_level(merged) != "full_jd"
+        ):
+            fallback = _secondary_fallback(merged, context)
+            if fallback is not None:
+                merged = _merge(merged, fallback)
+
         updated_by_key[key] = merged
 
         if merged.availability_status == "closed_by_official":
@@ -189,8 +353,12 @@ def enrich_stage1_shortlist(
                 progress("          -> closed_by_official")
         elif matching_evidence_level(merged) == "full_jd":
             upgraded += 1
+            if merged.jd_status == "fetched_official":
+                upgraded_official += 1
+            elif merged.jd_status == "fetched_secondary":
+                upgraded_secondary += 1
             if progress:
-                progress("          -> full_jd")
+                progress(f"          -> full_jd ({merged.jd_status})")
         elif progress:
             progress("          -> source_only")
 
@@ -212,6 +380,8 @@ def enrich_stage1_shortlist(
         already_full_jd=already_full_jd,
         researched=researched_count,
         upgraded_to_full_jd=upgraded,
+        upgraded_official=upgraded_official,
+        upgraded_secondary=upgraded_secondary,
         closed_by_official=closed,
         still_source_only=still_source_only,
         search_calls=context.search_calls,

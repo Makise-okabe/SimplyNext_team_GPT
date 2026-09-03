@@ -1,66 +1,150 @@
-# Architecture — SimplyNext Prototype
+# Architecture — SimplyNext Career Opportunity Agent v2
 
-## Goal
+## Product goal
 
-Convert forwarded NUS career information into evidence-backed, deduplicated opportunity records without requiring direct access to a student's institutional mailbox.
+Convert forwarded NUS career opportunities into a personalised, ranked and clickable job feed after a student uploads a resume and transcript.
 
-## Live flow
+The prototype optimises for **useful coverage**, not perfect crawling. A role remains rankable even when a public page cannot be fetched.
+
+## End-to-end flow
 
 ```text
-NUS career email
-      |
-student forwarding rule
-      |
-dedicated SimplyNext Outlook inbox
-      |
-Microsoft Graph (delegated Mail.Read)
-      |
-recover original sender + subject
-      |
-parse HTML / links / PDF attachments in memory
-      |
-normalized EmailMessage
-      |
-LangGraph Track B
-      |
-OpportunitySignal
-      |
-public / official web research
-      |
-verification
-      |-------------------------------|
-      |                               |
-official web matched          trusted NUS attachment matched
-      |                               |
-verified                     source_verified
-      |                               |
-      |----------- structured record -|
-                      |
-             optional SQLite memory
-             (no raw email/PDF text)
+NUS Goh / TalentConnect email
+        |
+Dedicated Outlook inbox
+        |
+Microsoft Graph Mail.Read
+        |
+Recover original sender + parse email/PDF
+        |
+Deterministic / bounded-LLM extraction
+        |
+Canonical active job catalog
+        |
+        |-------------------------------|
+        |                               |
+Resume + Transcript                     |
+        |                               |
+Student profile                         |
+explicit + course-derived skills        |
+        |                               |
+        |------------ Stage 1 ----------|
+                     |
+             Rough rank all jobs
+                     |
+            Top 30 + exploration
+                     |
+              Job Link Resolver
+                     |
+      official exact / probable
+      secondary exact / probable
+      company careers / unresolved
+                     |
+           Best-Effort JD Enricher
+                     |
+      full JD / partial JD / source-only
+                     |
+                 Re-rank
+                     |
+          Batched semantic Stage 2
+                     |
+              Final Top Matches
+                     |
+       skill evidence + match reason
+           + clickable job page
+                     |
+          Related Job Discovery
+       from top-matching companies
+                     |
+              "You may also like"
 ```
 
-## Privacy-minimised ingestion
+## Why link resolution and JD extraction are separate
 
-The dedicated inbox is an ingestion gateway, not an archive copied into the repository. PDF bytes are fetched from Graph and parsed in memory. Raw email bodies, PDF bytes and attachment text are not persisted by default.
+A job page can be useful to the student even when it is JavaScript-rendered, protected by anti-bot measures, or too sparse to produce a complete JD.
 
-When product memory is enabled, SimplyNext stores only normalized opportunity fields such as company, title, location, deadline, verification state and source provenance. This lets the prototype deduplicate opportunities and support a future dashboard without retaining raw mailbox content.
+Therefore each `JobRecord` stores independent page state:
 
-## Verification semantics
+- `job_page_url`
+- `job_page_kind`
+- `job_page_confidence`
 
-- `verified`: identity matched against a fetched public/official posting.
-- `source_verified`: identity matched directly against a PDF attachment from a trusted NUS career source, but no live official posting was proven.
-- `partial`: a public URL exists but evidence is incomplete or inaccessible.
-- `unresolved`: neither public evidence nor trusted attachment evidence is sufficient.
+and independent JD state:
 
-This distinction avoids pretending that an old or removed official posting is still live simply because NUS distributed a valid JD.
+- `fetched_official`
+- `fetched_secondary`
+- `partial_official`
+- `partial_secondary`
+- `source_context_only`
+- `unavailable`
 
-## Design principle
+A failed JD fetch never deletes a resolved job link.
 
-LangGraph is the orchestrator.
+## Matching evidence hierarchy
 
-Use deterministic Python for sender recovery, HTML/PDF parsing, URL extraction, attachment handling, deduplication, verification checks and storage. Use LLM reasoning only where ambiguity exists: extracting opportunity signals, researching candidate postings and interpreting free-form requirements.
+```text
+full_jd
+  strongest employer-role evidence
 
-## Next product layers
+partial_jd
+  useful fetched role evidence, but incomplete
 
-The current `OpportunityStore` is intentionally replaceable. A later hosted version can swap SQLite for DynamoDB/PostgreSQL without changing the Graph ingestion or LangGraph workflow. The structured store can feed a student profile matcher, ranking layer, notification agent and web UI.
+source_only
+  trusted NUS email + company/title + role-family inference
+```
+
+All three are valid ranking inputs. Evidence level affects confidence, not basic eligibility.
+
+Title-derived skills are allowed for broad relevance, e.g. `Embedded Software Engineer` can imply embedded systems / C/C++ / digital design. They are never presented as employer-stated requirements.
+
+## Web strategy
+
+Web work is concentrated on promising candidates instead of crawling the entire catalog deeply.
+
+Default selection:
+
+```text
+Top 30 deterministic matches
++ up to 5 uncertain exploration candidates
+```
+
+Resolution prefers official employer/ATS pages, then retains useful secondary exact-role pages when official evidence is unavailable. This maximises UI link coverage without mislabelling provenance.
+
+## Related-role discovery
+
+After reranking, SimplyNext searches a small number of top-matching companies for additional official roles. These jobs are marked `source_key=web_discovered`, kept separate from email-originated opportunities, and ranked with the same student profile.
+
+This powers a UI section such as:
+
+```text
+You may also like
+Reolink — Computer Vision Engineer
+Discovered by SimplyNext from company careers
+```
+
+## Reliability
+
+- Goh structured tables use deterministic parsing.
+- Stage 1 is deterministic.
+- Stage 2 uses small batches, individual candidate recovery, rate-limit backoff and explicit missing-assessment fallback.
+- Public search uses provider failover; shortlist discovery can aggregate providers for better recall.
+- Web failure is non-fatal to ranking.
+
+## Privacy
+
+The dedicated Outlook inbox is an ingestion gateway, not a repository archive. Raw mailbox exports, OAuth tokens, resumes and transcripts must not be committed.
+
+## AWS deployment mapping
+
+The architecture is intentionally deployable without changing the domain model:
+
+```text
+Web UI                 -> AWS Amplify
+API/workflow endpoints -> API Gateway + Lambda
+Resume/transcript      -> S3
+Profiles/jobs/results  -> DynamoDB
+LLM reasoning          -> Amazon Bedrock
+Observability          -> CloudWatch
+```
+
+The local Python implementation remains the reference workflow while cloud deployment is added.

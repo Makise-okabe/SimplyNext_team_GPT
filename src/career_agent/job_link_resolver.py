@@ -83,13 +83,6 @@ def _company_tokens(company: str | None) -> list[str]:
 
 
 def _resolver_company_match(company: str | None, identity_text: str) -> bool:
-    """Match employer identity without substring traps such as Face AI -> Facebook.
-
-    Multi-token brands that include a short distinguishing token (for example
-    ``Spirit AI`` or ``Face AI``) must keep that token. This prevents a shared
-    generic brand word from resolving to a different employer such as
-    Spirit AeroSystems or Facebook.
-    """
     company_tokens = _company_tokens(company)
     if not company_tokens:
         return False
@@ -101,9 +94,6 @@ def _resolver_company_match(company: str | None, identity_text: str) -> bool:
 
     distinctive_match = any(token in identity_tokens for token in distinctive)
 
-    # If the employer name includes a meaningful short brand/acronym token, it
-    # must also appear as a whole token. E.g. Spirit AI must contain both
-    # "spirit" and "ai"; matching only "spirit" is insufficient.
     if short and len(company_tokens) >= 2:
         if not all(token in identity_tokens for token in short):
             return False
@@ -120,7 +110,6 @@ def _resolver_company_match(company: str | None, identity_text: str) -> bool:
 
     if distinctive_match:
         return True
-
     if short and any(token in identity_tokens for token in short):
         return True
 
@@ -156,8 +145,7 @@ def _career_page_like(url: str) -> bool:
 
 def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str] | None:
     identity = f"{result.title} {result.url}"
-    company_matches = _resolver_company_match(job.company, identity)
-    if not company_matches:
+    if not _resolver_company_match(job.company, identity):
         return None
 
     official = is_plausible_official_url(result.url, job.company)
@@ -170,7 +158,9 @@ def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str
     elif (not official) and concrete and overlap >= MIN_SECONDARY_EXACT_TITLE_OVERLAP:
         kind = "secondary_exact"
         confidence = "medium"
-    elif official and _career_page_like(result.url):
+    elif official and (not concrete) and _career_page_like(result.url):
+        # A concrete page for another role is not a generic careers landing page.
+        # Example: Electrical Intern must not resolve to /jobs/mechanical-intern.
         kind = "company_careers"
         confidence = "low"
     else:
@@ -223,7 +213,6 @@ def _search_fallback_url(company: str, title: str) -> str:
 
 
 def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
-    """Resolve one exact role page with one logical search, else keep a fallback."""
     existing = _existing_resolution(job)
     if existing is not None:
         return _apply_resolution(job, existing), existing

@@ -76,8 +76,6 @@ def _select_for_web(
     for item in rankings[max(primary_count, 0) :]:
         if len(exploration) >= max(exploration_count, 0):
             break
-        # Exploration favours uncertain title-based matches that may improve
-        # substantially once a job page or JD is resolved.
         if item.get("confidence") not in {"low", "medium"}:
             continue
         if float(item.get("score") or 0.0) <= 0:
@@ -95,14 +93,14 @@ def run_opportunity_agent(
     *,
     student_profile: dict,
     jobs: list[dict],
-    web_primary_count: int = 30,
-    web_exploration_count: int = 5,
+    web_primary_count: int = 12,
+    web_exploration_count: int = 3,
     semantic_shortlist_count: int = 20,
-    related_company_count: int = 4,
-    related_per_company: int = 2,
+    related_company_count: int = 2,
+    related_per_company: int = 1,
     progress=None,
 ) -> OpportunityAgentResult:
-    """Run broad ranking, best-effort web resolution, reranking and discovery."""
+    """Rank broadly first, then enrich only a small high-value shortlist."""
     records = [_record(raw) for raw in jobs]
     payloads = [_matching_payload(job) for job in records]
     initial_rankings = [item.to_dict() for item in rank_jobs(student_profile, payloads)]

@@ -83,18 +83,45 @@ def _company_tokens(company: str | None) -> list[str]:
 
 
 def _resolver_company_match(company: str | None, identity_text: str) -> bool:
-    """Match company identity without substring traps such as Face AI -> Facebook."""
+    """Match employer identity without substring traps such as Face AI -> Facebook.
+
+    Multi-token brands that include a short distinguishing token (for example
+    ``Spirit AI`` or ``Face AI``) must keep that token. This prevents a shared
+    generic brand word from resolving to a different employer such as
+    Spirit AeroSystems or Facebook.
+    """
     company_tokens = _company_tokens(company)
     if not company_tokens:
         return False
 
     identity_tokens = set(TITLE_TOKEN_PATTERN.findall((identity_text or "").lower()))
     distinctive = [token for token in company_tokens if len(token) >= 4]
-    if any(token in identity_tokens for token in distinctive):
+    short = [token for token in company_tokens if 2 <= len(token) < 4]
+    one_letter = [token for token in company_tokens if len(token) == 1]
+
+    distinctive_match = any(token in identity_tokens for token in distinctive)
+
+    # If the employer name includes a meaningful short brand/acronym token, it
+    # must also appear as a whole token. E.g. Spirit AI must contain both
+    # "spirit" and "ai"; matching only "spirit" is insufficient.
+    if short and len(company_tokens) >= 2:
+        if not all(token in identity_tokens for token in short):
+            return False
+        if distinctive:
+            return distinctive_match
         return True
 
-    short = [token for token in company_tokens if 2 <= len(token) < 4]
-    if any(token in identity_tokens for token in short):
+    if one_letter and len(one_letter) == len(company_tokens):
+        if all(token in identity_tokens for token in one_letter):
+            return True
+        compact_letters = "".join(one_letter)
+        compact_identity = re.sub(r"[^a-z0-9]", "", (identity_text or "").lower())
+        return bool(compact_letters and compact_letters in compact_identity)
+
+    if distinctive_match:
+        return True
+
+    if short and any(token in identity_tokens for token in short):
         return True
 
     acronym = "".join(token[0] for token in company_tokens if token)
@@ -129,10 +156,11 @@ def _career_page_like(url: str) -> bool:
 
 def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str] | None:
     identity = f"{result.title} {result.url}"
-    official = is_plausible_official_url(result.url, job.company)
-    if not official and not _resolver_company_match(job.company, identity):
+    company_matches = _resolver_company_match(job.company, identity)
+    if not company_matches:
         return None
 
+    official = is_plausible_official_url(result.url, job.company)
     overlap = _resolver_title_overlap(job.title, identity)
     concrete = _looks_job_like(result.url)
 

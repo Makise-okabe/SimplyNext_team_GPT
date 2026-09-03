@@ -22,6 +22,7 @@ from career_agent.models.email import EmailMessage
 from career_agent.models.job_record import JobRecord
 from career_agent.models.signal import OpportunitySignal
 from career_agent.tools.web_search import SearchResult
+from career_agent.tools.web_search_aggregate import search_public_web_aggregated
 
 ProgressCallback = Callable[[str], None]
 MAX_SECONDARY_FETCH_CANDIDATES = 3
@@ -165,10 +166,6 @@ def _rank_secondary_candidates(job: JobRecord, results: list[SearchResult]) -> l
             continue
 
         official = is_plausible_official_url(result.url, job.company)
-        secondary = is_aggregator_url(result.url) or not official
-        if not official and not secondary:
-            continue
-
         score = overlap * 100.0
         if official:
             score += 30.0
@@ -199,6 +196,18 @@ def _usable_secondary_jd(job: JobRecord, page) -> str | None:
     return cleaned[:30_000]
 
 
+def _aggregated_fallback_search(context: ResearchContext, query: str) -> list[SearchResult]:
+    """Count one logical shortlist search while aggregating several providers."""
+    context.search_calls += 1
+    try:
+        return search_public_web_aggregated(query, max_results=12, min_results=6)
+    except Exception as exc:
+        context.warnings.append(
+            f"aggregated shortlist search failed: {type(exc).__name__}: {exc} | query={query}"
+        )
+        return []
+
+
 def _secondary_fallback(job: JobRecord, context: ResearchContext) -> JobRecord | None:
     """Use a verified public secondary JD only after official research fails.
 
@@ -216,7 +225,7 @@ def _secondary_fallback(job: JobRecord, context: ResearchContext) -> JobRecord |
 
     tried: set[str] = set()
     for query in queries:
-        results = context.search(query)
+        results = _aggregated_fallback_search(context, query)
         candidates = _rank_secondary_candidates(job, results)
         for result in candidates[:MAX_SECONDARY_FETCH_CANDIDATES]:
             if result.url in tried:
@@ -289,13 +298,7 @@ def enrich_stage1_shortlist(
     stage1_top_n: int = 20,
     progress: ProgressCallback | None = None,
 ) -> tuple[list[dict], ShortlistWebEnrichmentMetrics]:
-    """Upgrade only the Stage-1 shortlist with grounded public web evidence.
-
-    The broad candidate pool remains deterministic and cheap. Official employer/
-    ATS evidence is always attempted first. If no official JD is retrievable, a
-    company+title-verified secondary page may provide the JD while retaining clear
-    secondary provenance.
-    """
+    """Upgrade only the Stage-1 shortlist with grounded public web evidence."""
     selected = list(stage1_rankings[: max(stage1_top_n, 0)])
     selected_keys = {_job_key(item.get("company"), item.get("title")) for item in selected}
 

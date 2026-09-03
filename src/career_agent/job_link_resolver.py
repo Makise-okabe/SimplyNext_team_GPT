@@ -24,7 +24,6 @@ MEANINGFUL_SHORT_TITLE_TOKENS = {
 }
 TITLE_TOKEN_CANONICAL = {
     "engineers": "engineer",
-    "engineering": "engineer",
     "developer": "develop",
     "developers": "develop",
     "development": "develop",
@@ -94,7 +93,6 @@ def _resolver_company_match(company: str | None, identity_text: str) -> bool:
     if any(token in identity_tokens for token in distinctive):
         return True
 
-    # Support short brand/acronym names only as whole tokens.
     short = [token for token in company_tokens if 2 <= len(token) < 4]
     if any(token in identity_tokens for token in short):
         return True
@@ -130,8 +128,6 @@ def _career_page_like(url: str) -> bool:
 
 
 def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str] | None:
-    # Search snippets frequently echo the query itself, so they are deliberately
-    # excluded from exact company/title identity checks.
     identity = f"{result.title} {result.url}"
     official = is_plausible_official_url(result.url, job.company)
     if not official and not _resolver_company_match(job.company, identity):
@@ -176,8 +172,6 @@ def _existing_resolution(job: JobRecord) -> LinkResolution | None:
         if not url or url in seen:
             continue
         seen.add(url)
-        # Existing URLs came from the trusted source record, so include the known
-        # company/title as identity metadata rather than depending on a search snippet.
         result = SearchResult(
             title=f"{job.company or ''} {job.title or ''}".strip(),
             url=url,

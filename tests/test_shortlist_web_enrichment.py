@@ -111,15 +111,17 @@ def test_secondary_fallback_upgrades_jd_without_claiming_official_source(monkeyp
 
     secondary_url = "https://www.linkedin.com/jobs/view/123"
 
-    def fake_search(self, query):
-        self.search_calls += 1
-        return [
+    monkeypatch.setattr(
+        shortlist_web_enrichment,
+        "search_public_web_aggregated",
+        lambda query, max_results=12, min_results=6: [
             SearchResult(
                 title="Embedded Software Engineer - Goldilock",
                 url=secondary_url,
                 snippet="Goldilock Embedded Software Engineer Singapore responsibilities requirements",
             )
-        ]
+        ],
+    )
 
     def fake_fetch(self, url):
         self.fetch_calls += 1
@@ -136,7 +138,6 @@ def test_secondary_fallback_upgrades_jd_without_claiming_official_source(monkeyp
             ),
         )
 
-    monkeypatch.setattr(shortlist_web_enrichment.ResearchContext, "search", fake_search)
     monkeypatch.setattr(shortlist_web_enrichment.ResearchContext, "fetch", fake_fetch)
 
     enriched, metrics = enrich_stage1_shortlist(
@@ -154,3 +155,4 @@ def test_secondary_fallback_upgrades_jd_without_claiming_official_source(monkeyp
     assert metrics.upgraded_official == 0
     assert metrics.upgraded_secondary == 1
     assert metrics.still_source_only == 0
+    assert metrics.search_calls == 1

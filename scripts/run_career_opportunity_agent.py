@@ -54,8 +54,13 @@ def main() -> None:
     parser.add_argument("--jobs", default=str(DEFAULT_JOBS))
     parser.add_argument("--web-primary", type=int, default=12)
     parser.add_argument("--web-explore", type=int, default=3)
-    parser.add_argument("--semantic-top", type=int, default=10)
-    parser.add_argument("--top", type=int, default=10)
+    parser.add_argument(
+        "--semantic-top",
+        type=int,
+        default=5,
+        help="Number of jobs sent to the final LLM semantic review. Default 5 keeps the demo to one batch.",
+    )
+    parser.add_argument("--top", type=int, default=5)
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     args = parser.parse_args()
 
@@ -147,11 +152,20 @@ def main() -> None:
 
     related_lookup = _job_lookup(agent.related_jobs)
     related_cards = []
+    main_keys = {
+        (
+            " ".join(str(card.get("company") or "").lower().split()),
+            " ".join(str(card.get("title") or "").lower().split()),
+        )
+        for card in final_cards
+    }
     for item in agent.related_rankings[:8]:
         key = (
             " ".join(str(item.get("company") or "").lower().split()),
             " ".join(str(item.get("title") or "").lower().split()),
         )
+        if key in main_keys:
+            continue
         job = related_lookup.get(key, {})
         related_cards.append(
             {

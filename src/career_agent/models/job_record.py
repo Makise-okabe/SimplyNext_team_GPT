@@ -32,6 +32,11 @@ JobPageKind = Literal[
     "unresolved",
 ]
 JobPageConfidence = Literal["high", "medium", "low"]
+SearchResolutionStatus = Literal[
+    "resolved_job_page",
+    "search_fallback_only",
+    "not_searched",
+]
 
 
 class SourceDocument(BaseModel):
@@ -44,9 +49,9 @@ class SourceDocument(BaseModel):
 class JobRecord(BaseModel):
     """Canonical job contract consumed by the career-opportunity agent.
 
-    Page resolution and JD evidence are intentionally separate. A role can have a
-    useful clickable job page even when the page is dynamic, protected, or too
-    sparse to yield a full job description.
+    A concrete job page, a search fallback, and JD evidence are intentionally
+    separate. The UI can therefore remain useful even when a search provider
+    cannot resolve a direct posting or a dynamic page cannot be scraped.
     """
 
     source_key: Literal[
@@ -81,10 +86,15 @@ class JobRecord(BaseModel):
     official_job_url: str | None = None
     application_url: str | None = None
 
-    # UI-facing page resolution. This is independent from JD extraction.
+    # UI-facing concrete page resolution.
     job_page_url: str | None = None
     job_page_kind: JobPageKind = "unresolved"
     job_page_confidence: JobPageConfidence = "low"
+
+    # Search fallback is explicitly NOT treated as a resolved job page. It lets
+    # the UI offer "Find job" rather than showing a dead <unresolved> state.
+    search_fallback_url: str | None = None
+    search_resolution_status: SearchResolutionStatus = "not_searched"
 
     jd_status: JDStatus = "unavailable"
     jd_source_url: str | None = None

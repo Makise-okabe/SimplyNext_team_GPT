@@ -54,7 +54,7 @@ def main() -> None:
     parser.add_argument("--jobs", default=str(DEFAULT_JOBS))
     parser.add_argument("--web-primary", type=int, default=12)
     parser.add_argument("--web-explore", type=int, default=3)
-    parser.add_argument("--semantic-top", type=int, default=20)
+    parser.add_argument("--semantic-top", type=int, default=10)
     parser.add_argument("--top", type=int, default=10)
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     args = parser.parse_args()

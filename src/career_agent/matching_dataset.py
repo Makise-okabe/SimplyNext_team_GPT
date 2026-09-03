@@ -35,7 +35,7 @@ def is_aggregator_url(url: str | None) -> bool:
 
 
 def sanitize_job_sources(job: JobRecord) -> JobRecord:
-    """Remove third-party aggregators from employer-official source fields."""
+    """Keep official and secondary provenance separate without dropping UI links."""
     primary = job.primary_source_url
     secondary = job.secondary_source_url
 
@@ -58,18 +58,22 @@ def sanitize_job_sources(job: JobRecord) -> JobRecord:
 
 
 def is_matching_ready(job: JobRecord) -> bool:
-    """High-evidence matching input: active job with a fetched full JD."""
+    """High-evidence matching input: active job with a full fetched JD."""
     if job.availability_status in {"expired_by_source_deadline", "closed_by_official"}:
         return False
     if job.jd_status not in {"fetched_official", "fetched_secondary"}:
         return False
-    if not job.jd_source_url:
+    return bool(job.jd_source_url and len(job.jd_text.strip()) >= 500)
+
+
+def has_partial_jd(job: JobRecord) -> bool:
+    if job.availability_status in {"expired_by_source_deadline", "closed_by_official"}:
         return False
-    return len(job.jd_text.strip()) >= 500
+    return job.jd_status in {"partial_official", "partial_secondary"} and len(job.jd_text.strip()) >= 180
 
 
 def is_matching_candidate(job: JobRecord) -> bool:
-    """Any active circulated job can enter matching, even without a full JD."""
+    """Any active known job can be ranked, even with title/email evidence only."""
     if job.availability_status in {"expired_by_source_deadline", "closed_by_official"}:
         return False
     return bool((job.company or "").strip() and (job.title or "").strip())
@@ -78,14 +82,17 @@ def is_matching_candidate(job: JobRecord) -> bool:
 def matching_evidence_level(job: JobRecord) -> str:
     if is_matching_ready(job):
         return "full_jd"
+    if has_partial_jd(job):
+        return "partial_jd"
     if is_matching_candidate(job):
         return "source_only"
     return "inactive"
 
 
 def matching_input_text(job: JobRecord) -> str:
-    """Deterministic text handed to the later resume/JD matching LLM."""
-    if is_matching_ready(job):
+    """Best available deterministic evidence handed to the matching pipeline."""
+    level = matching_evidence_level(job)
+    if level in {"full_jd", "partial_jd"} and job.jd_text.strip():
         return job.jd_text.strip()
 
     parts = [

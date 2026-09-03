@@ -10,12 +10,13 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from pydantic import BaseModel, Field
 
-MAX_RESUME_CHARS = 12000
-MAX_JOB_EVIDENCE_CHARS = 3500
+MAX_RESUME_CHARS = 6000
+MAX_JOB_EVIDENCE_CHARS = 1800
+MAX_RELEVANT_COURSES = 16
 LLM_TIMEOUT_SECONDS = 45.0
 LLM_MAX_RETRIES = 1
-LLM_MODEL = "openai/gpt-oss-120b"
-STAGE2_BATCH_SIZE = 5
+LLM_MODEL = "openai/gpt-oss-20b"
+STAGE2_BATCH_SIZE = 10
 STAGE2_RATE_LIMIT_ATTEMPTS = 3
 STAGE2_RATE_LIMIT_FALLBACK_SECONDS = 5.0
 STAGE2_MAX_RATE_LIMIT_WAIT_SECONDS = 20.0
@@ -69,8 +70,9 @@ def _build_llm():
     load_dotenv()
     if not os.getenv("GROQ_API_KEY"):
         raise RuntimeError("GROQ_API_KEY is missing from .env")
+    model_name = os.getenv("GROQ_STAGE2_MODEL", LLM_MODEL).strip() or LLM_MODEL
     return ChatGroq(
-        model=LLM_MODEL,
+        model=model_name,
         temperature=0,
         timeout=LLM_TIMEOUT_SECONDS,
         max_retries=LLM_MAX_RETRIES,
@@ -81,19 +83,35 @@ def _build_llm():
     )
 
 
-def _course_summary(student_profile: dict) -> list[dict]:
-    items = []
+def _course_summary(student_profile: dict, relevant_skills: set[str] | None = None) -> list[dict]:
+    items: list[dict] = []
     for course in student_profile.get("course_enrichment") or []:
         if not isinstance(course, dict):
             continue
+        skills = [str(skill).lower() for skill in (course.get("skills") or []) if str(skill).strip()]
+        if not skills:
+            continue
+        overlap = len(set(skills) & (relevant_skills or set()))
         items.append(
             {
                 "module_code": course.get("module_code"),
                 "title": course.get("title"),
-                "skills": course.get("skills") or [],
+                "skills": skills,
+                "_overlap": overlap,
             }
         )
-    return items
+
+    items.sort(key=lambda item: (-int(item["_overlap"]), str(item.get("module_code") or "")))
+    compact = []
+    for item in items[:MAX_RELEVANT_COURSES]:
+        compact.append(
+            {
+                "module_code": item.get("module_code"),
+                "title": item.get("title"),
+                "skills": item.get("skills") or [],
+            }
+        )
+    return compact
 
 
 def _job_evidence(job: dict) -> str:
@@ -117,23 +135,23 @@ def build_stage2_prompt(
     if len(stage1_top) != len(source_jobs):
         raise ValueError("stage1_top and source_jobs must have the same length")
 
+    relevant_course_skills: set[str] = set()
     candidates = []
     for index, (ranked, job) in enumerate(zip(stage1_top, source_jobs)):
+        matched_course_skills = [str(skill).lower() for skill in (ranked.get("matched_course_skills") or [])]
+        relevant_course_skills.update(matched_course_skills)
         candidates.append(
             {
                 "candidate_index": index,
                 "company": ranked.get("company") or job.get("company"),
                 "title": ranked.get("title") or job.get("title"),
                 "stage1_score": ranked.get("score", 0),
-                "stage1_confidence": ranked.get("confidence"),
                 "job_evidence_level": job.get("matching_evidence_level", "source_only"),
                 "matched_resume_skills": ranked.get("matched_resume_skills") or [],
-                "matched_course_skills": ranked.get("matched_course_skills") or [],
+                "matched_course_skills": matched_course_skills,
                 "inferred_job_skills": ranked.get("inferred_job_skills") or [],
                 "location": job.get("location"),
                 "opportunity_type": job.get("opportunity_type"),
-                "target_major": job.get("target_major") or [],
-                "target_degree_level": job.get("target_degree_level") or [],
                 "job_evidence": _job_evidence(job),
             }
         )
@@ -141,43 +159,28 @@ def build_stage2_prompt(
     student = {
         "explicit_skills": student_profile.get("explicit_skills") or [],
         "course_derived_skills": student_profile.get("course_derived_skills") or [],
-        "courses": _course_summary(student_profile),
+        "relevant_courses": _course_summary(student_profile, relevant_course_skills),
         "resume_text": (resume_text or "")[:MAX_RESUME_CHARS],
     }
 
     return f"""
 You are the final semantic career-matching judge for an NUS student.
+Evaluate ALL candidates and return exactly one assessment for every candidate_index.
+Return one JSON object: {{"assessments": [ ... ]}}. Do not browse or discover jobs.
 
-Evaluate ALL candidates below. Return exactly one assessment for every candidate_index, with no duplicates.
-Return one JSON object with this root shape: {{"assessments": [ ... ]}}.
-Do not discover new jobs and do not browse the web.
+RULES:
+- Resume facts are strongest evidence. Course-derived skills are supporting evidence.
+- Job evidence strength: full JD > partial JD > trusted email/source-only context.
+- `inferred_job_skills` are hypotheses from the title, never employer-stated requirements.
+- Do not invent student skills, employer requirements, certifications, tools, or experience.
+- Judge role-family fit first; generic communication/leadership/data overlap cannot rescue a role mismatch.
+- Penalize explicit senior roles when the resume does not support that seniority.
+- Sparse job evidence can still yield a good match, but confidence should be lower.
+- For source-only/partial-JD jobs, only discuss requirements actually visible in the evidence.
+- Keep why_match to 1-2 concise sentences and each evidence/gap item short.
 
-EVIDENCE RULES:
-1. Student resume facts are strongest evidence of demonstrated experience.
-2. Course-derived skills are supporting evidence, not proof of professional mastery.
-3. Job evidence strength is: full JD > partial JD > trusted email/source-only context.
-4. `inferred_job_skills` are only hypotheses inferred from the title. Never present them as employer-stated requirements.
-5. Do not invent skills, requirements, achievements, preferences, or experience.
-6. Generic overlaps such as communication, leadership, or data analysis must not outweigh a clear role-family mismatch.
-7. Judge role-family fit first: semiconductor/electronics/embedded/software/AI/etc. A marketing or accounting role should not score highly merely because the student has communication or data skills.
-8. Seniority matters. Penalize clearly senior roles if the resume does not support that seniority.
-9. If job evidence is sparse, the candidate may still be a good match, but confidence must be lower.
-10. Use the whole resume, projects, internships and courses. Do not rely only on the Stage-1 matched-skill list.
-11. For `source_only` jobs, NEVER invent employer requirements from general industry knowledge. Only treat requirements explicitly present in `job_evidence` as employer requirements.
-12. If a `source_only` job lacks enough requirements to identify a specific gap, say that the job requirements are unavailable or evidence is sparse. Do not name speculative certifications, standards, tools, years of experience, or domain requirements.
-13. `missing_or_weak_evidence` must be grounded either in explicit job evidence or in an obvious property of the title itself, such as a role explicitly labelled Senior. Do not speculate beyond that.
-14. For `partial_jd` jobs, use only the requirements actually visible in the partial evidence. Do not assume the missing part of the JD contains additional requirements.
-
-SCORING CALIBRATION:
-90-100: unusually strong fit with multiple direct resume/project/course signals and little role mismatch.
-80-89: strong fit; several relevant signals, some gaps or sparse job evidence.
-65-79: plausible/good fit but notable gaps, uncertainty, or adjacent role family.
-45-64: possible but weak/partial fit.
-0-44: poor fit or mostly generic overlap.
-
-For `matched_evidence`, write short concrete evidence items supported by the resume or courses.
-For `missing_or_weak_evidence`, identify only grounded gaps or evidence uncertainty.
-Keep `why_match` concise (1-3 sentences).
+SCORE:
+90-100 unusually strong fit; 80-89 strong; 65-79 plausible/good; 45-64 weak/partial; 0-44 poor.
 
 STUDENT:
 {json.dumps(student, ensure_ascii=False)}
@@ -297,7 +300,7 @@ def rerank_stage1(
     student_profile: dict,
     all_jobs: list[dict],
     stage1_rankings: list[dict],
-    stage1_top_n: int = 20,
+    stage1_top_n: int = 10,
     llm=None,
     batch_size: int = STAGE2_BATCH_SIZE,
     show_progress: bool = False,

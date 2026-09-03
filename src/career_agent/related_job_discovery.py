@@ -7,7 +7,8 @@ from career_agent.hybrid_matching import infer_title_skills
 from career_agent.job_link_resolver import _looks_job_like
 from career_agent.job_research_quality import is_plausible_official_url
 from career_agent.models.job_record import JobRecord
-from career_agent.tools.web_search_aggregate import search_public_web_aggregated
+from career_agent.stage1_ranking import rank_job
+from career_agent.tools.web_search import search_public_web
 
 TITLE_CLEAN = re.compile(r"\s+[-|–—]\s+.*$")
 GENERIC_TITLES = {
@@ -66,6 +67,72 @@ def _looks_like_job_title(title: str) -> bool:
     return any(term in normalized for term in JOB_TITLE_TERMS)
 
 
+def _job_key(company: str | None, title: str | None) -> tuple[str, str]:
+    return _normalize(company), _normalize(title)
+
+
+def _same_company_existing_roles(
+    *,
+    company: str,
+    anchor_title: str,
+    student_profile: dict,
+    existing_jobs: list[dict],
+    per_company: int,
+) -> list[JobRecord]:
+    candidates: list[tuple[float, dict]] = []
+    anchor_key = _job_key(company, anchor_title)
+    for raw in existing_jobs:
+        if _normalize(raw.get("company")) != _normalize(company):
+            continue
+        if _job_key(raw.get("company"), raw.get("title")) == anchor_key:
+            continue
+        if str(raw.get("availability_status") or "") in {"expired_by_source_deadline", "closed_by_official"}:
+            continue
+        title = str(raw.get("title") or "").strip()
+        if not title:
+            continue
+        try:
+            ranked = rank_job(student_profile, raw)
+            score = float(ranked.score)
+        except Exception:
+            score = 0.0
+        if score <= 0:
+            continue
+        candidates.append((score, raw))
+
+    candidates.sort(key=lambda item: (-item[0], _normalize(item[1].get("title"))))
+    results: list[JobRecord] = []
+    for _, raw in candidates[: max(per_company, 0)]:
+        clean = dict(raw)
+        for key in (
+            "matching_ready",
+            "matching_candidate",
+            "matching_evidence_level",
+            "matching_input_text",
+        ):
+            clean.pop(key, None)
+        try:
+            record = JobRecord.model_validate(clean)
+        except Exception:
+            continue
+        results.append(
+            record.model_copy(
+                update={
+                    "research_basis": "related_role_from_existing_email_jobs",
+                    "evidence_summary": list(
+                        dict.fromkeys(
+                            [
+                                *record.evidence_summary,
+                                "same-company role already present in trusted career-email dataset",
+                            ]
+                        )
+                    ),
+                }
+            )
+        )
+    return results
+
+
 def discover_related_jobs(
     *,
     top_rankings: list[dict],
@@ -74,15 +141,14 @@ def discover_related_jobs(
     max_companies: int = 4,
     per_company: int = 2,
 ) -> tuple[list[JobRecord], RelatedDiscoveryMetrics]:
-    """Find a few additional concrete official roles from companies already ranking well."""
-    existing_keys = {
-        (_normalize(job.get("company")), _normalize(job.get("title"))) for job in existing_jobs
-    }
-    companies: list[str] = []
+    """Recommend same-company alternatives, then lightly search official roles if needed."""
+    existing_keys = {_job_key(job.get("company"), job.get("title")) for job in existing_jobs}
+    companies: list[tuple[str, str]] = []
     for item in top_rankings:
         company = str(item.get("company") or "").strip()
-        if company and company not in companies:
-            companies.append(company)
+        title = str(item.get("title") or "").strip()
+        if company and all(_normalize(company) != _normalize(existing[0]) for existing in companies):
+            companies.append((company, title))
         if len(companies) >= max_companies:
             break
 
@@ -106,33 +172,41 @@ def discover_related_jobs(
             "computer vision",
         )
         if skill in student_skills
-    ][:4]
+    ][:3]
     skill_query = " ".join(priority_terms) or "engineer"
 
     discovered: list[JobRecord] = []
     results_seen = 0
-    for company in companies:
-        queries = [
-            f'"{company}" careers {skill_query}',
-            f'"{company}" jobs engineer intern developer',
-        ]
-        merged_results = []
-        seen_urls: set[str] = set()
-        for query in queries:
-            for result in search_public_web_aggregated(
-                query,
-                max_results=20,
-                min_results=8,
-                strict_relevance=False,
-            ):
-                if result.url in seen_urls:
-                    continue
-                seen_urls.add(result.url)
-                merged_results.append(result)
+    companies_searched = 0
 
-        results_seen += len(merged_results)
+    for company, anchor_title in companies:
+        same_company = _same_company_existing_roles(
+            company=company,
+            anchor_title=anchor_title,
+            student_profile=student_profile,
+            existing_jobs=existing_jobs,
+            per_company=per_company,
+        )
+        for record in same_company:
+            key = _job_key(record.company, record.title)
+            if key in {_job_key(item.company, item.title) for item in discovered}:
+                continue
+            discovered.append(record)
+
+        remaining = max(per_company - len(same_company), 0)
+        if remaining <= 0:
+            continue
+
+        companies_searched += 1
+        query = f'"{company}" careers {skill_query} engineer intern developer'
+        try:
+            results = search_public_web(query, max_results=8)
+        except Exception:
+            results = []
+        results_seen += len(results)
+
         added = 0
-        for result in merged_results:
+        for result in results:
             if not is_plausible_official_url(result.url, company):
                 continue
             if not _looks_job_like(result.url):
@@ -142,8 +216,8 @@ def discover_related_jobs(
             if not _looks_like_job_title(title):
                 continue
 
-            key = (_normalize(company), _normalize(title))
-            if key in existing_keys:
+            key = _job_key(company, title)
+            if key in existing_keys or key in {_job_key(item.company, item.title) for item in discovered}:
                 continue
 
             title_skills = {skill.lower() for skill in infer_title_skills(title)}
@@ -173,13 +247,12 @@ def discover_related_jobs(
                 evidence_summary=["discovered from a concrete official company/ATS job page"],
             )
             discovered.append(record)
-            existing_keys.add(key)
             added += 1
-            if added >= per_company:
+            if added >= remaining:
                 break
 
     return discovered, RelatedDiscoveryMetrics(
-        companies_searched=len(companies),
+        companies_searched=companies_searched,
         results_seen=results_seen,
         roles_discovered=len(discovered),
     )

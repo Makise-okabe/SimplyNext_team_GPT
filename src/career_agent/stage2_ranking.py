@@ -18,6 +18,7 @@ LLM_MODEL = "openai/gpt-oss-120b"
 STAGE2_BATCH_SIZE = 5
 STAGE2_RATE_LIMIT_ATTEMPTS = 3
 STAGE2_RATE_LIMIT_FALLBACK_SECONDS = 5.0
+STAGE2_MAX_RATE_LIMIT_WAIT_SECONDS = 20.0
 MISSING_ASSESSMENT_SCORE_CAP = 60.0
 
 
@@ -33,6 +34,10 @@ class SemanticAssessment(BaseModel):
 
 class SemanticAssessmentBatch(BaseModel):
     assessments: list[SemanticAssessment] = Field(default_factory=list)
+
+
+class Stage2RateLimitUnavailable(RuntimeError):
+    """Raised when the provider asks us to wait too long for an interactive run."""
 
 
 @dataclass(frozen=True)
@@ -264,9 +269,19 @@ def _assess_chunk_with_rate_limit_retry(
                 job_chunk=job_chunk,
             )
         except Exception as exc:
-            if not _is_rate_limit_error(exc) or attempt >= STAGE2_RATE_LIMIT_ATTEMPTS:
+            if not _is_rate_limit_error(exc):
                 raise
+
             delay = _retry_after_seconds(exc, attempt)
+            if delay > STAGE2_MAX_RATE_LIMIT_WAIT_SECONDS:
+                raise Stage2RateLimitUnavailable(
+                    f"provider retry-after {delay:g}s exceeds interactive cap "
+                    f"of {STAGE2_MAX_RATE_LIMIT_WAIT_SECONDS:g}s"
+                ) from exc
+
+            if attempt >= STAGE2_RATE_LIMIT_ATTEMPTS:
+                raise Stage2RateLimitUnavailable("rate limit persisted after bounded retries") from exc
+
             if show_progress:
                 print(
                     f"{progress_indent}rate limited; waiting {delay:g}s "
@@ -301,6 +316,7 @@ def rerank_stage1(
     for batch_number, start in enumerate(range(0, len(selected), batch_size), start=1):
         ranked_chunk = selected[start : start + batch_size]
         job_chunk = source_jobs[start : start + batch_size]
+        skip_individual_retries = False
 
         if show_progress:
             print(f"      Stage 2 batch {batch_number}/{total_batches}: requesting {len(ranked_chunk)} candidates...")
@@ -316,6 +332,14 @@ def rerank_stage1(
                 show_progress=show_progress,
                 progress_indent="        ",
             )
+        except Stage2RateLimitUnavailable as exc:
+            found = {}
+            skip_individual_retries = True
+            if show_progress:
+                print(
+                    f"      Stage 2 batch {batch_number}/{total_batches}: "
+                    f"rate-limit window too long; skipping retries ({exc})"
+                )
         except Exception as exc:
             found = {}
             if show_progress:
@@ -330,6 +354,9 @@ def rerank_stage1(
                 f"      Stage 2 batch {batch_number}/{total_batches}: "
                 f"assessed {len(found)}/{len(ranked_chunk)}"
             )
+
+        if skip_individual_retries:
+            continue
 
         for retry_number, original_local in enumerate(missing_local, start=1):
             if show_progress:
@@ -348,6 +375,10 @@ def rerank_stage1(
                     show_progress=show_progress,
                     progress_indent="          ",
                 )
+            except Stage2RateLimitUnavailable as exc:
+                retry_found = {}
+                if show_progress:
+                    print(f"          rate-limit window too long; skipping ({exc})")
             except Exception as exc:
                 retry_found = {}
                 if show_progress:

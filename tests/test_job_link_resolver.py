@@ -121,6 +121,26 @@ def test_resolver_does_not_treat_facebook_as_face_ai(monkeypatch):
     assert resolved.job_page_url is None
 
 
+def test_resolver_rejects_spirit_aerosystems_for_spirit_ai(monkeypatch):
+    monkeypatch.setattr(
+        job_link_resolver,
+        "search_public_web",
+        lambda query, **kwargs: [
+            SearchResult(
+                title="College Internships | Spirit AeroSystems Careers",
+                url="https://careers.spiritaero.com/intern-college",
+                snippet="Spirit AI 2027 Fall Campus Recruitment",
+            )
+        ],
+    )
+    resolved, result = resolve_job_link(
+        _job("Spirit AI", "Spirit AI 2027 Fall Campus Recruitment")
+    )
+    assert result.url is None
+    assert result.kind == "unresolved"
+    assert resolved.job_page_url is None
+
+
 def test_resolver_rejects_probable_secondary_instead_of_guessing(monkeypatch):
     monkeypatch.setattr(
         job_link_resolver,

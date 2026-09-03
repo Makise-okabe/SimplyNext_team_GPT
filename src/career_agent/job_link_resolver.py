@@ -9,8 +9,8 @@ from career_agent.models.job_record import JobRecord
 from career_agent.tools.web_search import SearchResult
 from career_agent.tools.web_search_aggregate import search_public_web_aggregated
 
-MIN_EXACT_TITLE_OVERLAP = 0.55
-MIN_PROBABLE_TITLE_OVERLAP = 0.30
+MIN_EXACT_TITLE_OVERLAP = 0.50
+MIN_PROBABLE_TITLE_OVERLAP = 0.22
 
 
 @dataclass(frozen=True)
@@ -41,12 +41,16 @@ def _looks_job_like(url: str) -> bool:
             "requisition",
             "reqid=",
             "/position/",
+            "/positions/",
+            "/opening/",
+            "/openings/",
             "greenhouse",
             "lever.co",
             "myworkdayjobs",
             "workdayjobs",
             "smartrecruiters",
             "successfactors",
+            "employmenthero",
             "linkedin.com/jobs/view",
             "jobstreet",
             "indeed.",
@@ -74,7 +78,7 @@ def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str
         confidence = "high" if official else "medium"
     elif overlap >= MIN_PROBABLE_TITLE_OVERLAP and concrete:
         kind = "official_probable" if official else "secondary_probable"
-        confidence = "medium"
+        confidence = "medium" if official else "low"
     elif official and _career_page_like(result.url):
         kind = "company_careers"
         confidence = "low"
@@ -88,6 +92,8 @@ def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str
         score += 12.0
     if concrete:
         score += 20.0
+    if kind == "company_careers":
+        score -= 25.0
     return score, kind, confidence
 
 
@@ -114,6 +120,15 @@ def _existing_resolution(job: JobRecord) -> LinkResolution | None:
     return None
 
 
+def _queries(company: str, title: str) -> list[str]:
+    return [
+        f'"{company}" "{title}"',
+        f'{company} {title} job',
+        f'{company} {title} careers',
+        f'site:linkedin.com/jobs "{company}" "{title}"',
+    ]
+
+
 def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
     """Resolve the best clickable job page without requiring a fetchable JD."""
     existing = _existing_resolution(job)
@@ -126,15 +141,17 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         unresolved = LinkResolution(None, "unresolved", "low", None, 0)
         return job, unresolved
 
-    queries = [
-        f'"{company}" "{title}"',
-        f'{company} {title} careers',
-    ]
+    queries = _queries(company, title)
     scored_results: list[tuple[float, SearchResult, str, str, str]] = []
     seen: set[str] = set()
 
     for query in queries:
-        for result in search_public_web_aggregated(query, max_results=16, min_results=8):
+        for result in search_public_web_aggregated(
+            query,
+            max_results=20,
+            min_results=8,
+            strict_relevance=False,
+        ):
             if result.url in seen:
                 continue
             seen.add(result.url)
@@ -182,4 +199,7 @@ def _apply_resolution(job: JobRecord, resolution: LinkResolution) -> JobRecord:
     elif resolution.kind.startswith("secondary"):
         update["secondary_source_url"] = resolution.url
         update["application_url"] = job.application_url or resolution.url
+    elif resolution.kind == "company_careers":
+        update["primary_source_url"] = resolution.url
+        update["official_job_url"] = resolution.url
     return job.model_copy(update=update)

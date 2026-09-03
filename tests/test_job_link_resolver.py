@@ -4,60 +4,57 @@ from career_agent.models.job_record import JobRecord
 from career_agent.tools.web_search import SearchResult
 
 
-def _job():
+def _job(company="Reolink", title="AI Engineer"):
     return JobRecord(
         source_key="goh_ze_li",
         source_message_id="m1",
         source_subject="Career opportunities",
-        company="Reolink",
-        title="AI Engineer",
+        company=company,
+        title=title,
         opportunity_type="full_time",
         availability_status="active_candidate",
         record_kind="job_posting",
-        source_evidence="Reolink | AI Engineer",
+        source_evidence=f"{company} | {title}",
     )
 
 
-def test_resolver_keeps_clickable_secondary_page_without_jd(monkeypatch):
+def test_resolver_keeps_true_exact_secondary_page(monkeypatch):
     calls = []
 
     def fake_search(query, **kwargs):
-        calls.append(kwargs)
+        calls.append((query, kwargs))
         return [
             SearchResult(
                 title="AI Engineer - Reolink",
                 url="https://www.linkedin.com/jobs/view/123456",
-                snippet="Reolink AI Engineer Singapore",
+                snippet="Reolink is hiring across AI and engineering teams",
             )
         ]
 
-    monkeypatch.setattr(job_link_resolver, "search_public_web_aggregated", fake_search)
+    monkeypatch.setattr(job_link_resolver, "search_public_web", fake_search)
 
     resolved, result = resolve_job_link(_job())
     assert result.url == "https://www.linkedin.com/jobs/view/123456"
     assert result.kind == "secondary_exact"
-    assert resolved.job_page_url == result.url
     assert resolved.secondary_source_url == result.url
-    assert resolved.application_url == result.url
-    assert resolved.official_job_url is None
-    assert calls
-    assert all(call["strict_relevance"] is False for call in calls)
+    assert len(calls) == 1
+    assert calls[0][0] == '"Reolink" "AI Engineer" careers job'
 
 
-def test_resolver_prefers_official_exact_over_secondary(monkeypatch):
+def test_resolver_prefers_official_exact(monkeypatch):
     monkeypatch.setattr(
         job_link_resolver,
-        "search_public_web_aggregated",
+        "search_public_web",
         lambda query, **kwargs: [
             SearchResult(
                 title="AI Engineer - Reolink",
                 url="https://www.linkedin.com/jobs/view/123456",
-                snippet="Reolink AI Engineer",
+                snippet="Reolink AI team",
             ),
             SearchResult(
                 title="AI Engineer - Reolink Careers",
                 url="https://reolink.com/careers/jobs/ai-engineer",
-                snippet="Reolink AI Engineer careers",
+                snippet="Official Reolink careers page",
             ),
         ],
     )
@@ -68,13 +65,69 @@ def test_resolver_prefers_official_exact_over_secondary(monkeypatch):
     assert resolved.job_page_confidence == "high"
 
 
-def test_resolver_accepts_probable_concrete_job_page_below_old_search_threshold(monkeypatch):
+def test_resolver_rejects_goldilock_full_stack_for_embedded_role(monkeypatch):
     monkeypatch.setattr(
         job_link_resolver,
-        "search_public_web_aggregated",
+        "search_public_web",
         lambda query, **kwargs: [
             SearchResult(
-                title="Reolink hiring AI Engineering role",
+                title="Full Stack Developer at Goldilock Secure",
+                url="https://uk.linkedin.com/jobs/view/full-stack-developer-at-goldilock-secure-4366643587",
+                snippet="Search results may mention Embedded Software Engineer in nearby text",
+            )
+        ],
+    )
+    resolved, result = resolve_job_link(
+        _job("Goldilock", "Embedded Software Engineer (Aug - Nov/Dec 2026)")
+    )
+    assert result.url is None
+    assert result.kind == "unresolved"
+    assert resolved.job_page_url is None
+
+
+def test_resolver_rejects_mobile_application_role_for_chip_design(monkeypatch):
+    monkeypatch.setattr(
+        job_link_resolver,
+        "search_public_web",
+        lambda query, **kwargs: [
+            SearchResult(
+                title="Senior Mobile Application Engineer Jobs",
+                url="https://ph.jobstreet.com/senior-mobile-application-engineer-jobs/in-Orchard-Central-Region-SG",
+                snippet="Nanyang Singtech Chip Design Application Engineer",
+            )
+        ],
+    )
+    resolved, result = resolve_job_link(
+        _job("Nanyang Singtech", "Chip Design / Application Engineer")
+    )
+    assert result.url is None
+    assert resolved.job_page_url is None
+
+
+def test_resolver_does_not_treat_facebook_as_face_ai(monkeypatch):
+    monkeypatch.setattr(
+        job_link_resolver,
+        "search_public_web",
+        lambda query, **kwargs: [
+            SearchResult(
+                title="Facebook Artificial Intelligence Jobs",
+                url="https://www.linkedin.com/jobs/facebook-artificial-intelligence-jobs",
+                snippet="Face AI AI Research Engineer",
+            )
+        ],
+    )
+    resolved, result = resolve_job_link(_job("Face AI", "AI Research Engineer"))
+    assert result.url is None
+    assert resolved.job_page_url is None
+
+
+def test_resolver_rejects_probable_secondary_instead_of_guessing(monkeypatch):
+    monkeypatch.setattr(
+        job_link_resolver,
+        "search_public_web",
+        lambda query, **kwargs: [
+            SearchResult(
+                title="AI Engineering role - Reolink",
                 url="https://www.linkedin.com/jobs/view/654321",
                 snippet="Machine learning role at Reolink in Singapore",
             )
@@ -82,6 +135,6 @@ def test_resolver_accepts_probable_concrete_job_page_below_old_search_threshold(
     )
 
     resolved, result = resolve_job_link(_job())
-    assert result.url == "https://www.linkedin.com/jobs/view/654321"
-    assert result.kind in {"secondary_exact", "secondary_probable"}
-    assert resolved.job_page_url == result.url
+    assert result.url is None
+    assert result.kind == "unresolved"
+    assert resolved.search_resolution_status == "search_fallback_only"

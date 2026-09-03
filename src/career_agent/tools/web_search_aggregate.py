@@ -22,13 +22,15 @@ def _merge_results(
     original_query: str,
     constraint: tuple[str, str] | None,
     max_results: int,
+    strict_relevance: bool,
 ) -> None:
-    filtered = web_search._filter_results(
-        raw_results,
-        original_query=original_query,
-        constraint=constraint,
-        max_results=max_results,
-    )
+    if constraint is not None:
+        filtered = web_search._apply_site_constraint(raw_results, constraint, max_results)
+    elif strict_relevance:
+        filtered = web_search._apply_query_relevance(raw_results, original_query, max_results)
+    else:
+        filtered = raw_results[:max_results]
+
     for result in filtered:
         if result.url in seen:
             continue
@@ -43,14 +45,14 @@ def search_public_web_aggregated(
     *,
     max_results: int = 12,
     min_results: int = 6,
+    strict_relevance: bool = True,
 ) -> list[SearchResult]:
-    """Aggregate several public-search providers for shortlist JD discovery.
+    """Aggregate several public-search providers for shortlist web discovery.
 
-    The normal Track-B search intentionally stops at the first provider that
-    returns relevant metadata. For shortlist enrichment we need broader recall,
-    because an early provider may return a generic jobs page while another
-    provider has the concrete JD. This helper keeps the old search contract
-    untouched and is used only by the shortlist web-enrichment fallback.
+    ``strict_relevance=True`` keeps the older shortlist-JD behavior. Link
+    resolution uses ``False`` so the resolver itself can score lower-confidence
+    candidates instead of losing them in an earlier search-layer filter.
+    Site constraints are always enforced regardless of this setting.
     """
     if not query.strip() or max_results <= 0:
         return []
@@ -61,8 +63,6 @@ def search_public_web_aggregated(
     collected: list[SearchResult] = []
     seen: set[str] = set()
 
-    # Tavily remains useful when configured, but unlike the normal search path
-    # a short Tavily result set does not prevent us from checking public fallbacks.
     for variant in variants[:2]:
         try:
             _merge_results(
@@ -72,6 +72,7 @@ def search_public_web_aggregated(
                 original_query=query,
                 constraint=constraint,
                 max_results=max_results,
+                strict_relevance=strict_relevance,
             )
         except Exception:
             pass
@@ -106,6 +107,7 @@ def search_public_web_aggregated(
                 original_query=query,
                 constraint=constraint,
                 max_results=max_results,
+                strict_relevance=strict_relevance,
             )
             if len(collected) >= max_results:
                 return collected[:max_results]
@@ -132,6 +134,7 @@ def search_public_web_aggregated(
                 original_query=query,
                 constraint=constraint,
                 max_results=max_results,
+                strict_relevance=strict_relevance,
             )
             if len(collected) >= max_results:
                 return collected[:max_results]

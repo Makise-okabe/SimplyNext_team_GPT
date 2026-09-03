@@ -93,7 +93,7 @@ def _course_summary(student_profile: dict) -> list[dict]:
 
 def _job_evidence(job: dict) -> str:
     evidence_level = str(job.get("matching_evidence_level") or "source_only")
-    if evidence_level == "full_jd" and str(job.get("jd_text") or "").strip():
+    if evidence_level in {"full_jd", "partial_jd"} and str(job.get("jd_text") or "").strip():
         text = str(job.get("jd_text") or "")
     else:
         text = str(job.get("source_evidence") or "").strip()
@@ -150,7 +150,7 @@ Do not discover new jobs and do not browse the web.
 EVIDENCE RULES:
 1. Student resume facts are strongest evidence of demonstrated experience.
 2. Course-derived skills are supporting evidence, not proof of professional mastery.
-3. A full JD is stronger job evidence than email/source context.
+3. Job evidence strength is: full JD > partial JD > trusted email/source-only context.
 4. `inferred_job_skills` are only hypotheses inferred from the title. Never present them as employer-stated requirements.
 5. Do not invent skills, requirements, achievements, preferences, or experience.
 6. Generic overlaps such as communication, leadership, or data analysis must not outweigh a clear role-family mismatch.
@@ -161,6 +161,7 @@ EVIDENCE RULES:
 11. For `source_only` jobs, NEVER invent employer requirements from general industry knowledge. Only treat requirements explicitly present in `job_evidence` as employer requirements.
 12. If a `source_only` job lacks enough requirements to identify a specific gap, say that the job requirements are unavailable or evidence is sparse. Do not name speculative certifications, standards, tools, years of experience, or domain requirements.
 13. `missing_or_weak_evidence` must be grounded either in explicit job evidence or in an obvious property of the title itself, such as a role explicitly labelled Senior. Do not speculate beyond that.
+14. For `partial_jd` jobs, use only the requirements actually visible in the partial evidence. Do not assume the missing part of the JD contains additional requirements.
 
 SCORING CALIBRATION:
 90-100: unusually strong fit with multiple direct resume/project/course signals and little role mismatch.

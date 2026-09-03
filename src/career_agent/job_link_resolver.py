@@ -4,18 +4,20 @@ import re
 from dataclasses import dataclass
 from urllib.parse import quote_plus, urlparse
 
-from career_agent.company_job_research import _company_match
-from career_agent.job_research_quality import is_aggregator_url, is_plausible_official_url
+from career_agent.job_research_quality import is_plausible_official_url
 from career_agent.models.job_record import JobRecord
-from career_agent.tools.web_search import SearchResult
-from career_agent.tools.web_search_aggregate import search_public_web_aggregated
+from career_agent.tools.web_search import SearchResult, search_public_web
 
-MIN_EXACT_TITLE_OVERLAP = 0.50
-MIN_PROBABLE_TITLE_OVERLAP = 0.22
+MIN_OFFICIAL_EXACT_TITLE_OVERLAP = 0.65
+MIN_SECONDARY_EXACT_TITLE_OVERLAP = 0.80
 TITLE_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 TITLE_STOPWORDS = {
     "the", "and", "for", "with", "role", "position", "hiring",
     "career", "careers", "job", "jobs", "singapore",
+}
+COMPANY_LEGAL_STOPWORDS = {
+    "the", "pte", "ltd", "limited", "inc", "private", "company",
+    "corporation", "corp", "plc", "llc", "singapore", "branch",
 }
 MEANINGFUL_SHORT_TITLE_TOKENS = {
     "ai", "ml", "ic", "rf", "it", "qa", "ui", "ux", "hr", "3d", "5g",
@@ -73,6 +75,39 @@ def _resolver_title_overlap(title: str | None, text: str) -> float:
     return len(source & target) / len(source)
 
 
+def _company_tokens(company: str | None) -> list[str]:
+    return [
+        token
+        for token in TITLE_TOKEN_PATTERN.findall((company or "").lower())
+        if token not in COMPANY_LEGAL_STOPWORDS
+    ]
+
+
+def _resolver_company_match(company: str | None, identity_text: str) -> bool:
+    """Match company identity without substring traps such as Face AI -> Facebook."""
+    company_tokens = _company_tokens(company)
+    if not company_tokens:
+        return False
+
+    identity_tokens = set(TITLE_TOKEN_PATTERN.findall((identity_text or "").lower()))
+    distinctive = [token for token in company_tokens if len(token) >= 4]
+    if any(token in identity_tokens for token in distinctive):
+        return True
+
+    # Support short brand/acronym names only as whole tokens.
+    short = [token for token in company_tokens if 2 <= len(token) < 4]
+    if any(token in identity_tokens for token in short):
+        return True
+
+    acronym = "".join(token[0] for token in company_tokens if token)
+    if len(acronym) >= 2 and acronym in identity_tokens:
+        return True
+
+    compact_company = "".join(company_tokens)
+    compact_identity = re.sub(r"[^a-z0-9]", "", (identity_text or "").lower())
+    return len(compact_company) >= 5 and compact_company in compact_identity
+
+
 def _looks_job_like(url: str) -> bool:
     try:
         parsed = urlparse(url)
@@ -84,9 +119,7 @@ def _looks_job_like(url: str) -> bool:
         for marker in (
             "/job/", "/jobs/", "jobdetail", "job-detail", "jobid=", "job_id=",
             "jobcode=", "requisition", "reqid=", "/position/", "/positions/",
-            "/opening/", "/openings/", "greenhouse", "lever.co", "myworkdayjobs",
-            "workdayjobs", "smartrecruiters", "successfactors", "employmenthero",
-            "linkedin.com/jobs/view", "jobstreet", "indeed.",
+            "/opening/", "/openings/", "linkedin.com/jobs/view",
         )
     )
 
@@ -97,21 +130,22 @@ def _career_page_like(url: str) -> bool:
 
 
 def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str] | None:
-    metadata = f"{result.title} {result.snippet} {result.url}"
-    if not _company_match(job.company, metadata):
+    # Search snippets frequently echo the query itself, so they are deliberately
+    # excluded from exact company/title identity checks.
+    identity = f"{result.title} {result.url}"
+    official = is_plausible_official_url(result.url, job.company)
+    if not official and not _resolver_company_match(job.company, identity):
         return None
 
-    overlap = _resolver_title_overlap(job.title, metadata)
-    official = is_plausible_official_url(result.url, job.company)
-    secondary = is_aggregator_url(result.url)
+    overlap = _resolver_title_overlap(job.title, identity)
     concrete = _looks_job_like(result.url)
 
-    if overlap >= MIN_EXACT_TITLE_OVERLAP and concrete:
-        kind = "official_exact" if official else "secondary_exact"
-        confidence = "high" if official else "medium"
-    elif overlap >= MIN_PROBABLE_TITLE_OVERLAP and concrete:
-        kind = "official_probable" if official else "secondary_probable"
-        confidence = "medium" if official else "low"
+    if official and concrete and overlap >= MIN_OFFICIAL_EXACT_TITLE_OVERLAP:
+        kind = "official_exact"
+        confidence = "high"
+    elif (not official) and concrete and overlap >= MIN_SECONDARY_EXACT_TITLE_OVERLAP:
+        kind = "secondary_exact"
+        confidence = "medium"
     elif official and _career_page_like(result.url):
         kind = "company_careers"
         confidence = "low"
@@ -121,8 +155,6 @@ def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str
     score = overlap * 100.0
     if official:
         score += 35.0
-    elif secondary:
-        score += 12.0
     if concrete:
         score += 20.0
     if kind == "company_careers":
@@ -144,7 +176,13 @@ def _existing_resolution(job: JobRecord) -> LinkResolution | None:
         if not url or url in seen:
             continue
         seen.add(url)
-        result = SearchResult(title=job.title or "", url=url, snippet=job.company or "")
+        # Existing URLs came from the trusted source record, so include the known
+        # company/title as identity metadata rather than depending on a search snippet.
+        result = SearchResult(
+            title=f"{job.company or ''} {job.title or ''}".strip(),
+            url=url,
+            snippet="",
+        )
         scored = _score_result(job, result)
         if scored is None:
             continue
@@ -153,13 +191,8 @@ def _existing_resolution(job: JobRecord) -> LinkResolution | None:
     return None
 
 
-def _queries(company: str, title: str) -> list[str]:
-    return [
-        f'"{company}" "{title}"',
-        f'{company} {title} job',
-        f'{company} {title} careers',
-        f'site:linkedin.com/jobs "{company}" "{title}"',
-    ]
+def _query(company: str, title: str) -> str:
+    return f'"{company}" "{title}" careers job'
 
 
 def _search_fallback_url(company: str, title: str) -> str:
@@ -168,7 +201,7 @@ def _search_fallback_url(company: str, title: str) -> str:
 
 
 def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
-    """Resolve a concrete job page; otherwise attach an explicit search fallback."""
+    """Resolve one exact role page with one logical search, else keep a fallback."""
     existing = _existing_resolution(job)
     if existing is not None:
         return _apply_resolution(job, existing), existing
@@ -179,28 +212,22 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         unresolved = LinkResolution(None, "unresolved", "low", None, 0)
         return job.model_copy(update={"search_resolution_status": "not_searched"}), unresolved
 
-    queries = _queries(company, title)
-    scored_results: list[tuple[float, SearchResult, str, str, str]] = []
-    seen: set[str] = set()
+    query = _query(company, title)
+    try:
+        results = search_public_web(query, max_results=8)
+    except Exception:
+        results = []
 
-    for query in queries:
-        for result in search_public_web_aggregated(
-            query,
-            max_results=20,
-            min_results=8,
-            strict_relevance=False,
-        ):
-            if result.url in seen:
-                continue
-            seen.add(result.url)
-            scored = _score_result(job, result)
-            if scored is None:
-                continue
-            score, kind, confidence = scored
-            scored_results.append((score, result, kind, confidence, query))
+    scored_results: list[tuple[float, SearchResult, str, str]] = []
+    for result in results:
+        scored = _score_result(job, result)
+        if scored is None:
+            continue
+        score, kind, confidence = scored
+        scored_results.append((score, result, kind, confidence))
 
     if not scored_results:
-        unresolved = LinkResolution(None, "unresolved", "low", queries[0], 0)
+        unresolved = LinkResolution(None, "unresolved", "low", query, 0)
         fallback = _search_fallback_url(company, title)
         return job.model_copy(
             update={
@@ -213,7 +240,7 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         ), unresolved
 
     scored_results.sort(key=lambda item: item[0], reverse=True)
-    _, best, kind, confidence, query = scored_results[0]
+    _, best, kind, confidence = scored_results[0]
     resolution = LinkResolution(
         url=best.url,
         kind=kind,

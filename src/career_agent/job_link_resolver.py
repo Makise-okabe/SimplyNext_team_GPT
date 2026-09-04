@@ -41,6 +41,17 @@ TITLE_TOKEN_CANONICAL = {
     "analysts": "analysis",
 }
 
+# Email tables sometimes append application windows such as
+# "(Aug - Nov/Dec 2026)" to a real role title. Those tokens are metadata, not
+# part of the employer's canonical job title, and previously caused exact
+# LinkedIn/secondary pages to be rejected on title-overlap grounds.
+DATE_NOISE_PAREN_PATTERN = re.compile(
+    r"\([^)]*(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?|20\d{2})[^)]*\)",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class LinkResolution:
@@ -51,13 +62,18 @@ class LinkResolution:
     candidate_count: int
 
 
+def _clean_title(value: str | None) -> str:
+    text = DATE_NOISE_PAREN_PATTERN.sub(" ", value or "")
+    return " ".join(text.split()).strip()
+
+
 def _canonical_title_token(token: str) -> str:
     return TITLE_TOKEN_CANONICAL.get(token.lower(), token.lower())
 
 
 def _resolver_title_tokens(value: str | None) -> set[str]:
     tokens: set[str] = set()
-    for raw in TITLE_TOKEN_PATTERN.findall((value or "").lower()):
+    for raw in TITLE_TOKEN_PATTERN.findall(_clean_title(value).lower()):
         if raw in TITLE_STOPWORDS:
             continue
         if len(raw) < 3 and raw not in MEANINGFUL_SHORT_TITLE_TOKENS and not raw.isdigit():
@@ -131,9 +147,23 @@ def _looks_job_like(url: str) -> bool:
     return any(
         marker in value
         for marker in (
-            "/job/", "/jobs/", "jobdetail", "job-detail", "jobid=", "job_id=",
-            "jobcode=", "requisition", "reqid=", "/position/", "/positions/",
-            "/opening/", "/openings/", "linkedin.com/jobs/view",
+            "/job/",
+            "/jobs/",
+            "jobdetail",
+            "job-detail",
+            "job-listing",
+            "jobid=",
+            "job_id=",
+            "jobcode=",
+            "requisition",
+            "reqid=",
+            "/position/",
+            "/positions/",
+            "/opening/",
+            "/openings/",
+            "/opportunity/",
+            "/opportunities/",
+            "linkedin.com/jobs/view",
         )
     )
 
@@ -144,7 +174,11 @@ def _career_page_like(url: str) -> bool:
 
 
 def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str] | None:
-    identity = f"{result.title} {result.url}"
+    # The snippet matters. A role can be managed by a recruiting partner while
+    # the email names the sponsor/company. Example: AI Foundry's listing names
+    # Embracing Future Holdings in the job body even though the page title uses
+    # AI Foundry as the employer.
+    identity = f"{result.title} {result.url} {result.snippet}"
     if not _resolver_company_match(job.company, identity):
         return None
 
@@ -191,7 +225,7 @@ def _existing_resolution(job: JobRecord) -> LinkResolution | None:
             continue
         seen.add(url)
         result = SearchResult(
-            title=f"{job.company or ''} {job.title or ''}".strip(),
+            title=f"{job.company or ''} {_clean_title(job.title)}".strip(),
             url=url,
             snippet="",
         )
@@ -204,15 +238,27 @@ def _existing_resolution(job: JobRecord) -> LinkResolution | None:
 
 
 def _query(company: str, title: str) -> str:
-    return f'"{company}" "{title}" careers job'
+    return f'"{company}" "{_clean_title(title)}" careers job'
+
+
+def _deep_queries(company: str, title: str) -> list[str]:
+    clean_title = _clean_title(title)
+    variants = [
+        _query(company, clean_title),
+        f'"{company}" "{clean_title}" Singapore',
+        f'"{company}" "{clean_title}" apply',
+        f'site:linkedin.com/jobs/view "{company}" "{clean_title}"',
+    ]
+    seen: set[str] = set()
+    return [query for query in variants if query and not (query in seen or seen.add(query))]
 
 
 def _search_fallback_url(company: str, title: str) -> str:
-    query = f'"{company}" "{title}" jobs'
+    query = f'"{company}" "{_clean_title(title)}" jobs'
     return f"https://www.google.com/search?q={quote_plus(query)}"
 
 
-def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
+def resolve_job_link(job: JobRecord, *, deep_search: bool = False) -> tuple[JobRecord, LinkResolution]:
     existing = _existing_resolution(job)
     if existing is not None:
         return _apply_resolution(job, existing), existing
@@ -223,22 +269,37 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         unresolved = LinkResolution(None, "unresolved", "low", None, 0)
         return job.model_copy(update={"search_resolution_status": "not_searched"}), unresolved
 
-    query = _query(company, title)
-    try:
-        results = search_public_web(query, max_results=8)
-    except Exception:
-        results = []
+    queries = _deep_queries(company, title) if deep_search else [_query(company, title)]
+    scored_results: list[tuple[float, SearchResult, str, str, str]] = []
+    seen_urls: set[str] = set()
 
-    scored_results: list[tuple[float, SearchResult, str, str]] = []
-    for result in results:
-        scored = _score_result(job, result)
-        if scored is None:
-            continue
-        score, kind, confidence = scored
-        scored_results.append((score, result, kind, confidence))
+    for query in queries:
+        try:
+            results = search_public_web(query, max_results=10 if deep_search else 8)
+        except Exception:
+            results = []
+
+        for result in results:
+            if result.url in seen_urls:
+                continue
+            seen_urls.add(result.url)
+            scored = _score_result(job, result)
+            if scored is None:
+                continue
+            score, kind, confidence = scored
+            scored_results.append((score, result, kind, confidence, query))
+
+        # One fast query is enough for normal enrichment. Deep rescue continues
+        # through targeted variants unless a high-confidence official exact page
+        # has already been found.
+        if not deep_search:
+            break
+        if any(kind == "official_exact" and confidence == "high" for _, _, kind, confidence, _ in scored_results):
+            break
 
     if not scored_results:
-        unresolved = LinkResolution(None, "unresolved", "low", query, 0)
+        base_query = queries[0]
+        unresolved = LinkResolution(None, "unresolved", "low", base_query, 0)
         fallback = _search_fallback_url(company, title)
         return job.model_copy(
             update={
@@ -251,12 +312,12 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         ), unresolved
 
     scored_results.sort(key=lambda item: item[0], reverse=True)
-    _, best, kind, confidence = scored_results[0]
+    _, best, kind, confidence, best_query = scored_results[0]
     resolution = LinkResolution(
         url=best.url,
         kind=kind,
         confidence=confidence,
-        search_query=query,
+        search_query=best_query,
         candidate_count=len(scored_results),
     )
     return _apply_resolution(job, resolution), resolution

@@ -15,12 +15,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from career_agent.student_profile import build_student_profile
+from ui.live_pipeline import build_live_matching_candidates
 
-DEFAULT_JOBS = PROJECT_ROOT / "data/job_records/latest_matching_candidates.json"
-DEFAULT_RESULT = PROJECT_ROOT / "data/matching/career_opportunity_agent.json"
-DEFAULT_PROFILE = PROJECT_ROOT / "data/student_profiles/latest_student_profile.json"
 RUNNER = PROJECT_ROOT / "scripts/run_career_opportunity_agent.py"
 
 st.set_page_config(
@@ -46,6 +46,13 @@ def _pdf_text(path: Path) -> str:
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
+def _key(company: str | None, title: str | None) -> tuple[str, str]:
+    return (
+        " ".join(str(company or "").lower().split()),
+        " ".join(str(title or "").lower().split()),
+    )
+
+
 def _chips(values: list[str] | tuple[str, ...], *, limit: int | None = None) -> None:
     items = list(values)
     if limit is not None:
@@ -66,7 +73,14 @@ def _bullets(values: list[str] | tuple[str, ...], *, empty: str) -> None:
 
 
 def _reset() -> None:
-    for key in ("sn_result", "sn_profile", "sn_logs", "sn_resume_name", "sn_transcript_name"):
+    for key in (
+        "sn_result",
+        "sn_profile",
+        "sn_logs",
+        "sn_resume_name",
+        "sn_transcript_name",
+        "sn_live_build",
+    ):
         st.session_state.pop(key, None)
 
 
@@ -84,12 +98,14 @@ def _build_profile(resume_path: Path, transcript_path: Path) -> dict:
     }
 
 
-def _run_backend(resume_path: Path, transcript_path: Path, output_path: Path) -> tuple[dict, list[str]]:
-    jobs_path = Path(os.getenv("SIMPLYNEXT_JOBS_PATH", str(DEFAULT_JOBS)))
+def _run_backend(
+    resume_path: Path,
+    transcript_path: Path,
+    jobs_path: Path,
+    output_path: Path,
+) -> tuple[dict, list[str]]:
     if not jobs_path.exists():
-        raise FileNotFoundError(
-            f"Job catalogue not found at {jobs_path}. Run the email/job ingestion pipeline first."
-        )
+        raise FileNotFoundError(f"Live matching input was not produced at {jobs_path}.")
 
     command = [
         sys.executable,
@@ -109,8 +125,12 @@ def _run_backend(resume_path: Path, transcript_path: Path, output_path: Path) ->
     ]
 
     logs: list[str] = []
-    progress = st.progress(0, text="Preparing your analysis...")
+    progress = st.progress(0, text="Ranking live Outlook opportunities...")
     live_line = st.empty()
+    child_env = dict(os.environ)
+    # UI-only process encoding guard. The frozen runner itself remains untouched.
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    child_env["PYTHONUTF8"] = "1"
 
     process = subprocess.Popen(
         command,
@@ -118,7 +138,10 @@ def _run_backend(resume_path: Path, transcript_path: Path, output_path: Path) ->
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
+        env=child_env,
     )
 
     assert process.stdout is not None
@@ -129,15 +152,15 @@ def _run_backend(resume_path: Path, transcript_path: Path, output_path: Path) ->
         logs.append(line)
 
         if line.startswith("[1/4]"):
-            progress.progress(12, text="Building your student profile...")
+            progress.progress(18, text="Building your student profile...")
         elif line.startswith("[2/4]"):
-            progress.progress(32, text="Ranking opportunities from your career inbox...")
+            progress.progress(36, text="Ranking jobs recovered from Outlook...")
         elif "web summary:" in line:
-            progress.progress(62, text="Verifying the strongest opportunities on the web...")
+            progress.progress(64, text="Verifying the strongest opportunities on the web...")
         elif line.startswith("[3/4]"):
-            progress.progress(74, text="Running semantic fit validation on the top matches...")
+            progress.progress(76, text="Running semantic fit validation on the top matches...")
         elif line.startswith("[4/4]"):
-            progress.progress(91, text="Discovering related roles you may have missed...")
+            progress.progress(92, text="Discovering related roles you may have missed...")
 
         if line.startswith("[") or "summary:" in line or "Stage 2 batch" in line:
             live_line.caption(line)
@@ -151,8 +174,40 @@ def _run_backend(resume_path: Path, transcript_path: Path, output_path: Path) ->
 
     progress.progress(100, text="Your opportunity shortlist is ready.")
     if not output_path.exists():
-        raise RuntimeError("Backend completed without producing the expected result JSON.")
+        raise RuntimeError("Frozen backend completed without producing the expected result JSON.")
     return _load_json(output_path), logs
+
+
+def _attach_source_metadata(result: dict, source_index: dict[tuple[str, str], dict]) -> dict:
+    """Restore source/link fields already present in the live backend candidates.
+
+    The frozen runner intentionally emits a compact final-card contract and does
+    not repeat every primary/secondary source field. The UI joins those existing
+    backend fields back by company/title for display only. No score, ordering,
+    evidence, search, or URL is created here.
+    """
+    payload = dict(result)
+    enriched_cards = []
+    source_fields = (
+        "primary_source_url",
+        "secondary_source_url",
+        "official_job_url",
+        "application_url",
+        "jd_source_url",
+        "source_urls",
+        "research_status",
+        "research_confidence",
+        "research_basis",
+    )
+    for card in payload.get("top_matches") or []:
+        enriched = dict(card)
+        source = source_index.get(_key(card.get("company"), card.get("title")), {})
+        for field in source_fields:
+            if field not in enriched or not enriched.get(field):
+                enriched[field] = source.get(field)
+        enriched_cards.append(enriched)
+    payload["top_matches"] = enriched_cards
+    return payload
 
 
 def _render_header() -> None:
@@ -173,9 +228,9 @@ def _render_landing() -> None:
     st.markdown(
         """
         <section class="sn-hero">
-          <div class="sn-eyebrow">Built for NUS students · Human in the loop</div>
+          <div class="sn-eyebrow">Built for NUS students · Live Outlook career scan</div>
           <h1>Your next opportunity<br><span>is already in your inbox.</span></h1>
-          <p>Upload your resume and transcript. SimplyNext turns scattered career emails into a ranked, evidence-backed shortlist tailored to what you can actually do.</p>
+          <p>Upload your resume and transcript. SimplyNext reads the current trusted career emails in Outlook, runs the frozen career pipeline, and returns an evidence-backed shortlist.</p>
         </section>
         """,
         unsafe_allow_html=True,
@@ -200,26 +255,14 @@ def _render_landing() -> None:
         )
         st.caption("02 · Modules and course-derived skills")
 
-    action_col, demo_col, _ = st.columns([2.0, 1.6, 4.4])
+    action_col, _ = st.columns([2.2, 5.8])
     with action_col:
         run_clicked = st.button(
-            "Find my opportunities →",
+            "Scan Outlook & find matches →",
             type="primary",
             use_container_width=True,
             disabled=not (resume and transcript),
         )
-    with demo_col:
-        if st.button(
-            "Open latest analysis",
-            use_container_width=True,
-            disabled=not DEFAULT_RESULT.exists(),
-            help="Loads the most recent completed local run without calling the backend again.",
-        ):
-            st.session_state.sn_result = _load_json(DEFAULT_RESULT)
-            if DEFAULT_PROFILE.exists():
-                st.session_state.sn_profile = _load_json(DEFAULT_PROFILE)
-            st.session_state.sn_logs = []
-            st.rerun()
 
     if run_clicked and resume and transcript:
         try:
@@ -227,36 +270,68 @@ def _render_landing() -> None:
                 run_dir = Path(tmp_dir)
                 resume_path = run_dir / "resume.pdf"
                 transcript_path = run_dir / "transcript.pdf"
+                live_jobs_path = run_dir / "live_matching_candidates.json"
                 output_path = run_dir / "career_opportunity_agent.json"
                 resume_path.write_bytes(resume.getbuffer())
                 transcript_path.write_bytes(transcript.getbuffer())
 
-                with st.status("Reading your academic and project evidence...", expanded=True) as status:
+                with st.status("Running SimplyNext on your live Outlook inbox...", expanded=True) as status:
                     profile = _build_profile(resume_path, transcript_path)
                     status.write(
                         f"Profile ready: {len(profile.get('module_codes') or [])} modules and "
                         f"{len(profile.get('all_skills') or [])} skills detected."
                     )
-                    result, logs = _run_backend(resume_path, transcript_path, output_path)
-                    status.update(label="Analysis complete", state="complete", expanded=False)
+
+                    inbox_lines: list[str] = []
+
+                    def inbox_progress(line: str) -> None:
+                        inbox_lines.append(line)
+                        status.write(line)
+
+                    live_build = build_live_matching_candidates(
+                        live_jobs_path,
+                        progress=inbox_progress,
+                    )
+                    status.write(
+                        f"Outlook scan complete: {live_build.email_count} career emails → "
+                        f"{live_build.candidate_count} active candidates."
+                    )
+
+                    result, backend_logs = _run_backend(
+                        resume_path,
+                        transcript_path,
+                        live_jobs_path,
+                        output_path,
+                    )
+                    result = _attach_source_metadata(result, live_build.source_index)
+                    result["live_inbox"] = {
+                        "email_count": live_build.email_count,
+                        "email_source_counts": live_build.email_source_counts,
+                        "raw_job_count": live_build.raw_job_count,
+                        "canonical_job_count": live_build.canonical_job_count,
+                        "candidate_count": live_build.candidate_count,
+                        "candidate_source_counts": live_build.candidate_source_counts,
+                    }
+                    status.update(label="Live Outlook analysis complete", state="complete", expanded=False)
 
                 st.session_state.sn_result = result
                 st.session_state.sn_profile = profile
-                st.session_state.sn_logs = logs
+                st.session_state.sn_logs = [*inbox_lines, *backend_logs]
+                st.session_state.sn_live_build = result["live_inbox"]
                 st.session_state.sn_resume_name = resume.name
                 st.session_state.sn_transcript_name = transcript.name
                 st.rerun()
         except Exception as exc:
-            st.error("The analysis could not complete.")
+            st.error("The live Outlook analysis could not complete.")
             with st.expander("Technical details"):
                 st.code(str(exc))
 
     st.markdown("<div class='sn-flow-title'>What happens behind the screen</div>", unsafe_allow_html=True)
     flow_cols = st.columns(5)
     flow = [
-        ("01", "Profile", "Resume + transcript"),
-        ("02", "Rank", "All inbox jobs"),
-        ("03", "Verify", "Targeted web evidence"),
+        ("01", "Inbox", "All trusted career emails"),
+        ("02", "Extract", "Frozen email/JD pipeline"),
+        ("03", "Rank", "All active candidates"),
         ("04", "Validate", "Top-5 semantic fit"),
         ("05", "Discover", "Related roles"),
     ]
@@ -271,7 +346,7 @@ def _render_landing() -> None:
 def _render_profile(profile: dict | None, result: dict) -> None:
     st.markdown("## Your profile")
     if not profile:
-        st.caption("Profile details are unavailable for this saved analysis.")
+        st.caption("Profile details are unavailable for this analysis.")
         return
 
     modules = list(profile.get("module_codes") or [])
@@ -297,39 +372,50 @@ def _render_profile(profile: dict | None, result: dict) -> None:
         st.caption(f"Evidence sources: {resume_name or 'resume'} · {transcript_name or 'transcript'}")
 
 
-def _backend_job_destination(card: dict) -> tuple[str | None, str | None, bool]:
-    """Render exactly what the frozen backend contract provides; invent nothing in the UI."""
-    job_page_url = str(card.get("job_page_url") or "").strip()
-    if job_page_url:
-        kind = str(card.get("job_page_kind") or "").lower()
-        confidence = str(card.get("job_page_confidence") or "").lower()
-        if kind in {"official_exact", "secondary_exact"} and confidence != "low":
-            return "View Job ↗", job_page_url, True
-        return "Open Careers Page ↗", job_page_url, True
-
-    fallback_url = str(card.get("search_fallback_url") or "").strip()
-    if fallback_url:
-        return "Find Job ↗", fallback_url, False
-
-    return None, None, False
+def _unique_links(card: dict) -> list[tuple[str, str]]:
+    """Return backend-provided primary/secondary/application links only."""
+    ordered = [
+        ("Apply ↗", card.get("application_url")),
+        ("Official job page ↗", card.get("official_job_url")),
+        ("Primary source ↗", card.get("primary_source_url")),
+        ("Secondary source ↗", card.get("secondary_source_url")),
+        ("View job ↗", card.get("job_page_url")),
+    ]
+    seen: set[str] = set()
+    links: list[tuple[str, str]] = []
+    for label, raw_url in ordered:
+        url = str(raw_url or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        links.append((label, url))
+    return links
 
 
 def _render_job_cta(card: dict) -> None:
-    label, url, resolved = _backend_job_destination(card)
-    if url:
+    links = _unique_links(card)
+    if links:
+        for index, (label, url) in enumerate(links[:2]):
+            st.link_button(
+                label,
+                url,
+                type="primary" if index == 0 else "secondary",
+                use_container_width=True,
+            )
+        return
+
+    fallback_url = str(card.get("search_fallback_url") or "").strip()
+    if fallback_url:
         st.link_button(
-            label or "Open Job ↗",
-            url,
-            type="primary" if resolved else "secondary",
+            "Search fallback ↗",
+            fallback_url,
+            type="secondary",
             use_container_width=True,
-            help=None if resolved else "Search fallback supplied by the frozen backend result.",
+            help="The frozen backend did not resolve a direct primary/secondary job page for this role.",
         )
         return
 
-    st.markdown(
-        "<div class='sn-unavailable'>Job link unavailable</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("<div class='sn-unavailable'>No direct job page resolved</div>", unsafe_allow_html=True)
 
 
 def _evidence_label(card: dict) -> str:
@@ -351,7 +437,7 @@ def _render_match_card(card: dict, rank: int) -> None:
     evidence = _evidence_label(card)
 
     with st.container(border=True):
-        score_col, body_col, action_col = st.columns([1.1, 5.4, 1.8], vertical_alignment="center")
+        score_col, body_col, action_col = st.columns([1.1, 5.1, 2.1], vertical_alignment="center")
         with score_col:
             st.markdown(
                 f"<div class='sn-score'><span>{score:.0f}</span><small>% match</small></div>",
@@ -413,32 +499,41 @@ def _render_related_card(card: dict) -> None:
 
 def _render_dashboard(result: dict, profile: dict | None) -> None:
     metrics = result.get("metrics") or {}
+    live = result.get("live_inbox") or {}
     top_matches = list(result.get("top_matches") or [])
     related = list(result.get("related_jobs") or [])
 
     st.markdown(
         """
         <section class="sn-dashboard-hero">
-          <div class="sn-eyebrow">Analysis complete</div>
+          <div class="sn-eyebrow">Live Outlook analysis complete</div>
           <h1>Your strongest opportunities,<br><span>ranked with evidence.</span></h1>
-          <p>We searched broadly, enriched selectively, then used semantic review only where it adds value.</p>
+          <p>The shortlist below was built from the career emails currently recovered from your connected Outlook inbox.</p>
         </section>
         """,
         unsafe_allow_html=True,
     )
 
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("Inbox opportunities", int(metrics.get("active_jobs") or 0))
-    metric_cols[1].metric("Web enriched", int(metrics.get("web_selected") or 0))
-    metric_cols[2].metric("Semantic validated", int(metrics.get("semantic_assessed") or 0))
-    metric_cols[3].metric("Related roles found", int(metrics.get("related_jobs_discovered") or 0))
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Career emails", int(live.get("email_count") or 0))
+    metric_cols[1].metric("Active candidates", int(live.get("candidate_count") or metrics.get("active_jobs") or 0))
+    metric_cols[2].metric("Web enriched", int(metrics.get("web_selected") or 0))
+    metric_cols[3].metric("Semantic validated", int(metrics.get("semantic_assessed") or 0))
+    metric_cols[4].metric("Related roles", int(metrics.get("related_jobs_discovered") or 0))
+
+    source_counts = live.get("email_source_counts") or {}
+    if source_counts:
+        st.caption(
+            f"Live inbox sources: {int(source_counts.get('goh_ze_li') or 0)} Goh Ze Li email(s) · "
+            f"{int(source_counts.get('talentconnect') or 0)} TalentConnect email(s)"
+        )
 
     st.divider()
     _render_profile(profile, result)
 
     st.divider()
     st.markdown("## Top matches")
-    st.caption("Ranked from the full email opportunity set. The top shortlist receives targeted web and semantic enrichment.")
+    st.caption("Ranked by the frozen career-opportunity backend from this run's live Outlook job catalogue.")
     if not top_matches:
         st.warning("No top matches were produced by this analysis.")
     for rank, card in enumerate(top_matches, start=1):
@@ -447,7 +542,7 @@ def _render_dashboard(result: dict, profile: dict | None) -> None:
     if related:
         st.divider()
         st.markdown("## You may also like")
-        st.caption("Related roles discovered from companies already showing strong fit with your profile.")
+        st.caption("Related roles discovered by the frozen backend from companies already showing strong fit.")
         columns = st.columns(min(3, len(related)), gap="large")
         for index, card in enumerate(related[:6]):
             with columns[index % len(columns)]:
@@ -465,7 +560,7 @@ def _render_dashboard(result: dict, profile: dict | None) -> None:
     logs = st.session_state.get("sn_logs") or []
     if logs:
         with st.expander("Demo diagnostics"):
-            st.code("\n".join(logs[-40:]), language="text")
+            st.code("\n".join(logs[-80:]), language="text")
 
 
 _load_css()

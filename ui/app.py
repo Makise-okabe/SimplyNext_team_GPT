@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlencode
 
 import streamlit as st
 from pypdf import PdfReader
@@ -321,15 +322,42 @@ def _trusted_job_destination(card: dict) -> tuple[str | None, str | None]:
     return "Open Careers Portal ↗", url
 
 
+def _linkedin_jobs_url(card: dict) -> str:
+    """Build a transparent LinkedIn Jobs search fallback, not a claimed exact posting."""
+    company = str(card.get("company") or "").strip()
+    title = str(card.get("title") or "").strip()
+    keywords = " ".join(value for value in (title, company) if value)
+    return "https://www.linkedin.com/jobs/search/?" + urlencode(
+        {
+            "keywords": keywords,
+            "location": "Singapore",
+        }
+    )
+
+
 def _render_job_cta(card: dict) -> None:
     label, url = _trusted_job_destination(card)
     if url:
         st.link_button(label or "Open Job Portal ↗", url, type="primary", use_container_width=True)
-    else:
-        st.markdown(
-            "<div class='sn-unavailable'>Job portal unavailable</div>",
-            unsafe_allow_html=True,
-        )
+        return
+
+    st.link_button(
+        "Search on LinkedIn ↗",
+        _linkedin_jobs_url(card),
+        type="secondary",
+        use_container_width=True,
+        help="No verified direct job posting was resolved. Opens a LinkedIn Jobs search for this company and role.",
+    )
+
+
+def _evidence_label(card: dict) -> str:
+    level = str(card.get("evidence_level") or "source_only").lower()
+    labels = {
+        "full_jd": "Full JD evidence",
+        "partial_jd": "Partial JD evidence",
+        "source_only": "Email evidence",
+    }
+    return labels.get(level, level.replace("_", " ").title())
 
 
 def _render_match_card(card: dict, rank: int) -> None:
@@ -338,8 +366,7 @@ def _render_match_card(card: dict, rank: int) -> None:
     title = str(card.get("title") or "Untitled role")
     fit = str(card.get("fit_label") or "possible").title()
     confidence = str(card.get("confidence") or "low").title()
-    evidence = str(card.get("evidence_level") or "source_only").replace("_", " ").title()
-    jd_status = str(card.get("jd_status") or "unavailable").replace("_", " ").title()
+    evidence = _evidence_label(card)
 
     with st.container(border=True):
         score_col, body_col, action_col = st.columns([1.1, 5.4, 1.8], vertical_alignment="center")
@@ -354,8 +381,7 @@ def _render_match_card(card: dict, rank: int) -> None:
             st.markdown(
                 f"<div class='sn-meta'><span>{html.escape(fit)} fit</span>"
                 f"<span>{html.escape(confidence)} confidence</span>"
-                f"<span>{html.escape(evidence)} evidence</span>"
-                f"<span>{html.escape(jd_status)} JD</span></div>",
+                f"<span>{html.escape(evidence)}</span></div>",
                 unsafe_allow_html=True,
             )
         with action_col:

@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import quote_plus
 
 import streamlit as st
 from pypdf import PdfReader
@@ -23,7 +22,6 @@ DEFAULT_JOBS = PROJECT_ROOT / "data/job_records/latest_matching_candidates.json"
 DEFAULT_RESULT = PROJECT_ROOT / "data/matching/career_opportunity_agent.json"
 DEFAULT_PROFILE = PROJECT_ROOT / "data/student_profiles/latest_student_profile.json"
 RUNNER = PROJECT_ROOT / "scripts/run_career_opportunity_agent.py"
-
 
 st.set_page_config(
     page_title="SimplyNext — Career Opportunity Agent",
@@ -46,11 +44,6 @@ def _load_json(path: Path) -> dict:
 def _pdf_text(path: Path) -> str:
     reader = PdfReader(str(path))
     return "\n".join(page.extract_text() or "" for page in reader.pages)
-
-
-def _search_url(company: str, title: str) -> str:
-    query = quote_plus(f'{company} "{title}" jobs')
-    return f"https://www.google.com/search?q={query}"
 
 
 def _chips(values: list[str] | tuple[str, ...], *, limit: int | None = None) -> None:
@@ -171,11 +164,9 @@ def _render_header() -> None:
             unsafe_allow_html=True,
         )
     with right:
-        if "sn_result" in st.session_state:
-            if st.button("New analysis", use_container_width=True):
-                _reset()
-                st.rerun()
-
+        if "sn_result" in st.session_state and st.button("New analysis", use_container_width=True):
+            _reset()
+            st.rerun()
 
 
 def _render_landing() -> None:
@@ -191,8 +182,8 @@ def _render_landing() -> None:
     )
 
     st.markdown("### Start your career scan")
-    upload_left, upload_right = st.columns(2, gap="large")
-    with upload_left:
+    left, right = st.columns(2, gap="large")
+    with left:
         resume = st.file_uploader(
             "Resume",
             type=["pdf"],
@@ -200,7 +191,7 @@ def _render_landing() -> None:
             help="PDF only. Used to identify explicit skills, projects and experience.",
         )
         st.caption("01 · Skills, projects and experience")
-    with upload_right:
+    with right:
         transcript = st.file_uploader(
             "Transcript",
             type=["pdf"],
@@ -209,7 +200,7 @@ def _render_landing() -> None:
         )
         st.caption("02 · Modules and course-derived skills")
 
-    action_col, demo_col, spacer = st.columns([2.0, 1.6, 4.4])
+    action_col, demo_col, _ = st.columns([2.0, 1.6, 4.4])
     with action_col:
         run_clicked = st.button(
             "Find my opportunities →",
@@ -218,11 +209,10 @@ def _render_landing() -> None:
             disabled=not (resume and transcript),
         )
     with demo_col:
-        latest_available = DEFAULT_RESULT.exists()
         if st.button(
             "Open latest analysis",
             use_container_width=True,
-            disabled=not latest_available,
+            disabled=not DEFAULT_RESULT.exists(),
             help="Loads the most recent completed local run without calling the backend again.",
         ):
             st.session_state.sn_result = _load_json(DEFAULT_RESULT)
@@ -260,8 +250,6 @@ def _render_landing() -> None:
             st.error("The analysis could not complete.")
             with st.expander("Technical details"):
                 st.code(str(exc))
-            if DEFAULT_RESULT.exists():
-                st.info("Your last completed analysis is still available with **Open latest analysis** above.")
 
     st.markdown("<div class='sn-flow-title'>What happens behind the screen</div>", unsafe_allow_html=True)
     flow_cols = st.columns(5)
@@ -309,25 +297,39 @@ def _render_profile(profile: dict | None, result: dict) -> None:
         st.caption(f"Evidence sources: {resume_name or 'resume'} · {transcript_name or 'transcript'}")
 
 
-def _job_button_label(card: dict) -> tuple[str, str]:
-    url = card.get("job_page_url")
+def _trusted_job_destination(card: dict) -> tuple[str | None, str | None]:
+    """Return only a backend-resolved job/application/careers URL — never a search fallback."""
+    candidates = [
+        card.get("job_page_url"),
+        card.get("application_url"),
+        card.get("official_job_url"),
+    ]
+    url = next((str(value).strip() for value in candidates if str(value or "").strip()), None)
+    if not url:
+        return None, None
+
     kind = str(card.get("job_page_kind") or "").lower()
     confidence = str(card.get("job_page_confidence") or "").lower()
-
     exact_markers = ("exact", "job_page", "job_posting", "secondary")
-    generic_markers = ("career", "generic", "company_home", "unresolved")
-    exactish = bool(url) and any(marker in kind for marker in exact_markers) and not any(
+    generic_markers = ("career", "generic", "company_home")
+
+    exactish = any(marker in kind for marker in exact_markers) and not any(
         marker in kind for marker in generic_markers
     )
     if exactish and confidence != "low":
-        return "View Job ↗", str(url)
-    if url:
-        return "Company Careers ↗", str(url)
+        return "View Job ↗", url
+    return "Open Careers Portal ↗", url
 
-    fallback = card.get("search_fallback_url") or _search_url(
-        str(card.get("company") or ""), str(card.get("title") or "")
-    )
-    return "Search Job ↗", str(fallback)
+
+def _render_job_cta(card: dict) -> None:
+    label, url = _trusted_job_destination(card)
+    if url:
+        st.link_button(label or "Open Job Portal ↗", url, type="primary", use_container_width=True)
+    else:
+        st.markdown(
+            "<div class='sn-unavailable'>Job portal unavailable</div>",
+            unsafe_allow_html=True,
+        )
 
 
 def _render_match_card(card: dict, rank: int) -> None:
@@ -357,11 +359,9 @@ def _render_match_card(card: dict, rank: int) -> None:
                 unsafe_allow_html=True,
             )
         with action_col:
-            label, url = _job_button_label(card)
-            st.link_button(label, url, type="primary", use_container_width=True)
+            _render_job_cta(card)
 
-        why_match = str(card.get("why_match") or "No semantic explanation available.")
-        st.write(why_match)
+        st.write(str(card.get("why_match") or "No semantic explanation available."))
 
         matched = list(card.get("matched_resume_skills") or []) + list(card.get("matched_course_skills") or [])
         if matched:
@@ -394,17 +394,13 @@ def _render_related_card(card: dict) -> None:
     company = str(card.get("company") or "Unknown company")
     title = str(card.get("title") or "Untitled role")
     score = float(card.get("score") or card.get("final_score") or 0)
-    url = card.get("job_page_url")
 
     with st.container(border=True):
         st.caption(company)
         st.markdown(f"#### {title}")
         st.markdown(f"**{score:.0f}% match**")
         st.caption(card.get("recommendation_reason") or "Related role from a strongly matching company.")
-        if url:
-            st.link_button("View Job ↗", str(url), use_container_width=True)
-        else:
-            st.link_button("Search Job ↗", _search_url(company, title), use_container_width=True)
+        _render_job_cta(card)
 
 
 def _render_dashboard(result: dict, profile: dict | None) -> None:

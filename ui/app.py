@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import urlencode
 
 import streamlit as st
 from pypdf import PdfReader
@@ -298,55 +297,38 @@ def _render_profile(profile: dict | None, result: dict) -> None:
         st.caption(f"Evidence sources: {resume_name or 'resume'} · {transcript_name or 'transcript'}")
 
 
-def _trusted_job_destination(card: dict) -> tuple[str | None, str | None]:
-    """Return only a backend-resolved job/application/careers URL — never a search fallback."""
-    candidates = [
-        card.get("job_page_url"),
-        card.get("application_url"),
-        card.get("official_job_url"),
-    ]
-    url = next((str(value).strip() for value in candidates if str(value or "").strip()), None)
-    if not url:
-        return None, None
+def _backend_job_destination(card: dict) -> tuple[str | None, str | None, bool]:
+    """Render exactly what the frozen backend contract provides; invent nothing in the UI."""
+    job_page_url = str(card.get("job_page_url") or "").strip()
+    if job_page_url:
+        kind = str(card.get("job_page_kind") or "").lower()
+        confidence = str(card.get("job_page_confidence") or "").lower()
+        if kind in {"official_exact", "secondary_exact"} and confidence != "low":
+            return "View Job ↗", job_page_url, True
+        return "Open Careers Page ↗", job_page_url, True
 
-    kind = str(card.get("job_page_kind") or "").lower()
-    confidence = str(card.get("job_page_confidence") or "").lower()
-    exact_markers = ("exact", "job_page", "job_posting", "secondary")
-    generic_markers = ("career", "generic", "company_home")
+    fallback_url = str(card.get("search_fallback_url") or "").strip()
+    if fallback_url:
+        return "Find Job ↗", fallback_url, False
 
-    exactish = any(marker in kind for marker in exact_markers) and not any(
-        marker in kind for marker in generic_markers
-    )
-    if exactish and confidence != "low":
-        return "View Job ↗", url
-    return "Open Careers Portal ↗", url
-
-
-def _linkedin_jobs_url(card: dict) -> str:
-    """Build a transparent LinkedIn Jobs search fallback, not a claimed exact posting."""
-    company = str(card.get("company") or "").strip()
-    title = str(card.get("title") or "").strip()
-    keywords = " ".join(value for value in (title, company) if value)
-    return "https://www.linkedin.com/jobs/search/?" + urlencode(
-        {
-            "keywords": keywords,
-            "location": "Singapore",
-        }
-    )
+    return None, None, False
 
 
 def _render_job_cta(card: dict) -> None:
-    label, url = _trusted_job_destination(card)
+    label, url, resolved = _backend_job_destination(card)
     if url:
-        st.link_button(label or "Open Job Portal ↗", url, type="primary", use_container_width=True)
+        st.link_button(
+            label or "Open Job ↗",
+            url,
+            type="primary" if resolved else "secondary",
+            use_container_width=True,
+            help=None if resolved else "Search fallback supplied by the frozen backend result.",
+        )
         return
 
-    st.link_button(
-        "Search on LinkedIn ↗",
-        _linkedin_jobs_url(card),
-        type="secondary",
-        use_container_width=True,
-        help="No verified direct job posting was resolved. Opens a LinkedIn Jobs search for this company and role.",
+    st.markdown(
+        "<div class='sn-unavailable'>Job link unavailable</div>",
+        unsafe_allow_html=True,
     )
 
 

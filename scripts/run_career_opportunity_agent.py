@@ -8,6 +8,18 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pypdf import PdfReader
 
+# The matching run may return perfectly valid Unicode from the LLM (for example
+# non-breaking hyphens). On Windows, the console can still default to GBK/cp936.
+# Keep the native console encoding, but replace characters it cannot represent
+# instead of crashing after the result JSON has already been written.
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        try:
+            _reconfigure(errors="replace")
+        except Exception:
+            pass
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:

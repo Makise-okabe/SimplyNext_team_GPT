@@ -32,18 +32,10 @@ def actionable_job_links(card: dict) -> list[tuple[str, str]]:
         label = "Check likely official page ↗" if card.get("candidate_job_kind") == "official_candidate" else "Check secondary listing ↗"
         links.append((label, candidate))
 
-    careers = str(card.get("company_careers_url") or "")
-    if public_http_url(careers) and careers != candidate:
-        links.append(("Open company careers ↗", careers))
-
     company = str(card.get("company") or "").strip()
     title = clean_search_title(str(card.get("title") or "").strip())
     location = str(card.get("location") or "Singapore").strip()
     if company and title:
-        exact_query = quote_plus(f'"{company}" "{title}" official careers job')
-        google_url = str(card.get("search_fallback_url") or f"https://www.google.com/search?q={exact_query}")
-        if public_http_url(google_url):
-            links.append(("Search official job ↗", google_url))
         linkedin_url = "https://www.linkedin.com/jobs/search/?" + f"keywords={quote_plus(company + ' ' + title)}&location={quote_plus(location)}"
         links.append(("Search LinkedIn ↗", linkedin_url))
 
@@ -59,7 +51,7 @@ def actionable_job_links(card: dict) -> list[tuple[str, str]]:
 def job_card(job: dict, ranked: dict) -> dict:
     card = {**job, **ranked}
     # Ranking models cannot manufacture or restore source/link fields.
-    for field in (*LINK_FIELDS, "job_page_kind", "job_page_confidence", "link_verification_status", "link_checked_at", "link_verification_reason", "availability_status"):
+    for field in (*LINK_FIELDS, "candidate_job_url", "candidate_job_kind", "candidate_job_reason", "company_careers_url", "job_page_kind", "job_page_confidence", "link_verification_status", "link_checked_at", "link_verification_reason", "availability_status"):
         card[field] = job.get(field)
     card["evidence_level"] = job.get("matching_evidence_level") or ranked.get("evidence_level") or "source_only"
     card["source_label"] = SOURCE_LABELS.get(str(job.get("source_key")), "Career source")

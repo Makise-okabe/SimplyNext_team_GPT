@@ -22,6 +22,6 @@ def test_unverified_result_card_renders_clickable_official_and_linkedin_searches
 
     assert not app.exception
     labels_and_urls = {(button.label, button.url) for button in app.get("link_button")}
-    assert any(label == "Search official job ↗" and "google.com/search" in url for label, url in labels_and_urls)
+    assert not any("google.com/search" in url for _, url in labels_and_urls)
     assert any(label == "Search LinkedIn ↗" and "linkedin.com/jobs/search" in url for label, url in labels_and_urls)
     assert all("Nov%2FDec" not in url for _, url in labels_and_urls)

@@ -48,7 +48,7 @@ def test_resolver_keeps_true_exact_secondary_page(monkeypatch):
     assert result.url == "https://www.linkedin.com/jobs/view/123456"
     assert result.kind == "secondary_exact"
     assert resolved.secondary_source_url == result.url
-    assert len(calls) == 1
+    assert len(calls) == 3  # A secondary hit must not stop official discovery.
     assert calls[0][0] == '"Reolink" "AI Engineer" careers job'
 
 

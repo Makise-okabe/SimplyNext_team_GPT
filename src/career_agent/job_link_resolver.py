@@ -70,7 +70,7 @@ def _resolver_title_tokens(value: str | None) -> set[str]:
 
 
 def _resolver_title_overlap(title: str | None, text: str) -> float:
-    source = _resolver_title_tokens(title)
+    source = _resolver_title_tokens(clean_search_title(title or ""))
     if not source:
         return 0.0
     target = _resolver_title_tokens(text)
@@ -138,12 +138,12 @@ def _looks_job_like(url: str) -> bool:
         return True
     if (parsed.hostname or "").endswith(".lever.co"):
         return len([p for p in path.split("/") if p]) >= 2
-    return bool(re.search(r"/(?:jobs?|positions?|openings?)/[^/]+|/(?:jobdetail|job-detail|requisition)/[^/]+", path))
+    return bool(re.search(r"/(?:jobs?|careers?|positions?|openings?)/[^/]+|/(?:jobdetail|job-detail|requisition)/[^/]+", path))
 
 
 def _career_page_like(url: str) -> bool:
     value = (url or "").lower()
-    return any(marker in value for marker in ("career", "careers", "jobs", "recruit"))
+    return any(marker in value for marker in ("career", "careers", "jobs", "recruit", "join-us", "join-our-team"))
 
 
 def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str] | None:
@@ -201,13 +201,14 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
     attempts, tried, fetched = [], set(), 0
     best_secondary = None
     best_candidate: tuple[float, str, str, str] | None = None
+    rejected_urls: set[str] = set()
     best_careers_url = job.company_careers_url
     closed = None
     query_used = None
 
     def remember_candidate(url: str, *, score: float, reason: str) -> None:
         nonlocal best_candidate
-        if not public_http_url(url):
+        if not public_http_url(url) or url in rejected_urls:
             return
         if is_plausible_official_url(url, company):
             kind = "official_candidate"
@@ -225,6 +226,9 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
             "search_fallback_url": _search_fallback_url(company, title),
             "search_resolution_status": "search_fallback_only",
             "company_careers_url": best_careers_url,
+            "candidate_job_url": None,
+            "candidate_job_kind": None,
+            "candidate_job_reason": None,
         }
         if best_candidate:
             _, url, kind, reason = best_candidate
@@ -236,7 +240,7 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         return update
 
     def check(url, query):
-        nonlocal fetched, closed, best_secondary, best_careers_url
+        nonlocal fetched, closed, best_secondary, best_careers_url, best_candidate
         if not public_http_url(url) or url in tried or fetched >= 6:
             return None
         tried.add(url)
@@ -247,6 +251,10 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
             attempts.append({"url": url, "status": "unavailable", "reason": type(exc).__name__, "query": query})
             return None
         verification = verify_job_page(job, page)
+        if verification.status not in {"verified", "unavailable", "blocked"}:
+            rejected_urls.add(url)
+            if best_candidate and best_candidate[1] == url:
+                best_candidate = None
         attempts.append({"url": url, "final_url": page.final_url, "status": verification.status, "reason": verification.reason, "query": query})
         if verification.status == "verified":
             resolved = apply_page_verification(base, verification)
@@ -259,9 +267,12 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         if verification.status == "generic_page" and is_plausible_official_url(page.final_url, company):
             best_careers_url = best_careers_url or page.final_url
             links = [link for link in page.links if _looks_job_like(link) and is_plausible_official_url(link, company)]
-            links.sort(key=lambda link: _resolver_title_overlap(title, unquote(link)), reverse=True)
+            labels = dict(page.link_labels)
+            def link_overlap(link):
+                return _resolver_title_overlap(title, labels.get(link, "") + " " + unquote(link))
+            links.sort(key=link_overlap, reverse=True)
             for link in links[:2]:
-                if _resolver_title_overlap(clean_search_title(title), unquote(link)) < .5:
+                if link_overlap(link) < .5:
                     continue
                 found = check(link, "employer_page_link")
                 if found:
@@ -323,7 +334,7 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
                 return finish(found)
             if closed:
                 return finish(closed)
-        if best_secondary or fetched >= 6:
+        if fetched >= 6:
             break
     if best_secondary:
         return finish(best_secondary)

@@ -369,7 +369,7 @@ def _render_job_cta(card: dict) -> None:
         from urllib.parse import urlparse
         st.caption(urlparse(links[0][1]).hostname or "")
         if not verified_job_url(card):
-            st.caption("Candidate/search link · open it to confirm the current posting")
+            st.caption("Official role page not verified. Candidate pages and LinkedIn search are labelled separately.")
         return
 
     st.markdown("<div class='sn-unavailable'>No searchable company or role name</div>", unsafe_allow_html=True)
@@ -507,7 +507,7 @@ def _render_dashboard(result: dict, profile: dict | None) -> None:
     if int(metrics.get("web_selected") or 0) and not search_provider:
         st.warning(
             "A stable web-search API was not configured for this run, so automatic JD retrieval was limited. "
-            "Every card still includes clickable official-site and LinkedIn searches for manual checking."
+            "LinkedIn search remains available; official buttons require a specific role page, never a Google search or company homepage."
         )
     st.caption("Match scores compare fit; they are not a probability of receiving an offer.")
     for_you, all_jobs, your_profile = st.tabs(["For you", "All opportunities", "Your profile"])

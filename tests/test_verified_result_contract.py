@@ -65,10 +65,9 @@ def test_old_alias_cannot_restore_unverified_button():
 def test_every_named_opportunity_has_clickable_search_fallbacks():
     card = job_card(job().model_dump(), {})
     links = actionable_job_links(card)
-    assert links[0][0] == "Search official job ↗"
-    assert links[0][1].startswith("https://www.google.com/search?")
-    assert links[1][0] == "Search LinkedIn ↗"
-    assert links[1][1].startswith("https://www.linkedin.com/jobs/search/?")
+    assert links[0][0] == "Search LinkedIn ↗"
+    assert links[0][1].startswith("https://www.linkedin.com/jobs/search/?")
+    assert not any("google.com" in url for _, url in links)
 
 
 def test_likely_official_candidate_is_shown_before_search_fallback():

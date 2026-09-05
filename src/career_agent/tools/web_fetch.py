@@ -20,6 +20,7 @@ class FetchedPage:
     headings: tuple[str, ...] = ()
     job_postings: tuple[dict, ...] = ()
     extraction_method: str = "html"
+    link_labels: tuple[tuple[str, str], ...] = ()
 
 
 def public_http_url(url: str) -> bool:
@@ -71,11 +72,15 @@ def parse_html_page(url: str, final_url: str, status_code: int, content: str) ->
         if public_http_url(absolute := urljoin(final_url, str(anchor.get("href") or "")))
     ))[:500]
     headings = tuple(h.get_text(" ", strip=True) for h in soup.find_all("h1"))
+    link_labels = tuple(
+        (urljoin(final_url, str(a.get("href") or "")), a.get_text(" ", strip=True))
+        for a in soup.find_all("a", href=True)
+    )[:500]
     title = soup.title.get_text(" ", strip=True) if soup.title else ""
     for tag in soup(["script", "style", "noscript", "svg", "nav", "footer"]):
         tag.decompose()
     text = "\n".join(line.strip() for line in soup.get_text("\n").splitlines() if line.strip())
-    return FetchedPage(url, final_url, status_code, title, text[:30000], links, headings, tuple(jobs))
+    return FetchedPage(url, final_url, status_code, title, text[:30000], links, headings, tuple(jobs), link_labels=link_labels)
 
 
 def _ats_posting(client, url: str) -> dict | None:

@@ -373,19 +373,37 @@ def _render_profile(profile: dict | None, result: dict) -> None:
 
 
 def _unique_links(card: dict) -> list[tuple[str, str]]:
-    """Return backend-provided primary/secondary/application links only."""
-    ordered = [
-        ("Apply ↗", card.get("application_url")),
-        ("Official job page ↗", card.get("official_job_url")),
-        ("Primary source ↗", card.get("primary_source_url")),
-        ("Secondary source ↗", card.get("secondary_source_url")),
-        ("View job ↗", card.get("job_page_url")),
-    ]
+    """Return only direct backend-resolved job/source links; never search fallbacks."""
+    job_page_url = str(card.get("job_page_url") or "").strip()
+    kind = str(card.get("job_page_kind") or "").lower()
+
+    ordered: list[tuple[str, str | None]] = []
+    if job_page_url and kind.startswith("official"):
+        ordered.append(("Primary job page ↗", job_page_url))
+    elif job_page_url and kind.startswith("secondary"):
+        ordered.append(("Secondary job page ↗", job_page_url))
+    elif job_page_url and kind == "company_careers":
+        ordered.append(("Company careers ↗", job_page_url))
+    elif job_page_url and kind != "unresolved":
+        ordered.append(("View job ↗", job_page_url))
+
+    ordered.extend(
+        [
+            ("Apply ↗", card.get("application_url")),
+            ("Official job page ↗", card.get("official_job_url")),
+            ("Primary source ↗", card.get("primary_source_url")),
+            ("Secondary source ↗", card.get("secondary_source_url")),
+        ]
+    )
+
     seen: set[str] = set()
     links: list[tuple[str, str]] = []
     for label, raw_url in ordered:
         url = str(raw_url or "").strip()
         if not url or url in seen:
+            continue
+        lowered = url.lower()
+        if "google.com/search" in lowered or "bing.com/search" in lowered or "duckduckgo.com/" in lowered:
             continue
         seen.add(url)
         links.append((label, url))
@@ -402,17 +420,6 @@ def _render_job_cta(card: dict) -> None:
                 type="primary" if index == 0 else "secondary",
                 use_container_width=True,
             )
-        return
-
-    fallback_url = str(card.get("search_fallback_url") or "").strip()
-    if fallback_url:
-        st.link_button(
-            "Search fallback ↗",
-            fallback_url,
-            type="secondary",
-            use_container_width=True,
-            help="The frozen backend did not resolve a direct primary/secondary job page for this role.",
-        )
         return
 
     st.markdown("<div class='sn-unavailable'>No direct job page resolved</div>", unsafe_allow_html=True)

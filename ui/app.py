@@ -298,8 +298,20 @@ def _render_landing() -> None:
                     )
                     result = _attach_source_metadata(result, live_build.source_index)
 
+                    # Link quality is important, but it is presentation enrichment.
+                    # A timeout/provider/page error here must never discard an
+                    # already-completed ranking result or prevent the dashboard.
+                    link_logs: list[str] = []
                     status.write("Validating displayed job links against the live destination pages...")
-                    result, link_logs = rescue_result_links(result, progress=status.write)
+                    try:
+                        result, link_logs = rescue_result_links(result, progress=status.write)
+                    except Exception as link_exc:
+                        warning = (
+                            "Link validation could not complete; showing the ranked results without "
+                            f"unverified links. ({type(link_exc).__name__}: {link_exc})"
+                        )
+                        link_logs.append(warning)
+                        status.write(warning)
 
                     result["live_inbox"] = {
                         "email_count": live_build.email_count,

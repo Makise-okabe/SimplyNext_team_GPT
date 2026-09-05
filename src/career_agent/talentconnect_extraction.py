@@ -40,6 +40,8 @@ def _build_llm():
     return ChatGroq(
         model="openai/gpt-oss-120b",
         temperature=0,
+        timeout=20.0,
+        max_retries=0,
     ).with_structured_output(ExtractedOpportunityBatch)
 
 

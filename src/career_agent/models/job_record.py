@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from career_agent.models.opportunity_research import RecordKind, ResearchStatus
 from career_agent.models.signal import OpportunitySignal, OpportunityType
@@ -60,12 +60,17 @@ class JobRecord(BaseModel):
         "web_discovered",
         "unknown",
     ] = "unknown"
+    record_id: str = ""
     source_message_id: str
     source_sender_email: str | None = None
     source_subject: str
 
     company: str | None = None
     title: str | None = None
+    industry: str | None = None
+    talentconnect_id: str | None = None
+    remarks: str = ""
+    job_id: str | None = None
     location: str | None = None
     opportunity_type: OpportunityType = "unknown"
     deadline_hint: date | None = None
@@ -90,6 +95,16 @@ class JobRecord(BaseModel):
     job_page_url: str | None = None
     job_page_kind: JobPageKind = "unresolved"
     job_page_confidence: JobPageConfidence = "low"
+    link_verification_status: str = "not_checked"
+    link_checked_at: str | None = None
+    link_verification_reason: str = ""
+    link_attempts: list[dict] = Field(default_factory=list)
+    company_careers_url: str | None = None
+    responsibilities: list[str] = Field(default_factory=list)
+    required_skills: list[str] = Field(default_factory=list)
+    preferred_skills: list[str] = Field(default_factory=list)
+    qualifications: list[str] = Field(default_factory=list)
+    source_provenance: list[dict] = Field(default_factory=list)
 
     # Search fallback is explicitly NOT treated as a resolved job page. It lets
     # the UI offer "Find job" rather than showing a dead <unresolved> state.
@@ -104,6 +119,13 @@ class JobRecord(BaseModel):
     evidence_summary: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def assign_record_id(self):
+        if not self.record_id:
+            from career_agent.record_identity import record_key
+            self.record_id = record_key(self.model_dump())
+        return self
 
 
 class EmailOpportunityResearchResult(BaseModel):

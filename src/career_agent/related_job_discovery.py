@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from career_agent.research_session import current_session
 from career_agent.hybrid_matching import infer_title_skills
 from career_agent.job_link_resolver import _looks_job_like
 from career_agent.job_research_quality import is_plausible_official_url
@@ -145,6 +146,8 @@ def discover_related_jobs(
     main_shortlist_count: int = 5,
 ) -> tuple[list[JobRecord], RelatedDiscoveryMetrics]:
     """Recommend alternatives outside the main shortlist, then lightly search if needed."""
+    if max_companies <= 0 or per_company <= 0:
+        return [], RelatedDiscoveryMetrics(0, 0, 0)
     existing_keys = {_job_key(job.get("company"), job.get("title")) for job in existing_jobs}
     excluded_keys = {
         _job_key(item.get("company"), item.get("title"))
@@ -209,7 +212,7 @@ def discover_related_jobs(
         companies_searched += 1
         query = f'"{company}" careers {skill_query} engineer intern developer'
         try:
-            results = search_public_web(query, max_results=8)
+            results = current_session().search(query, search_public_web)
         except Exception:
             results = []
         results_seen += len(results)

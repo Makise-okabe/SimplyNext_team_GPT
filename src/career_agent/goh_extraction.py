@@ -133,13 +133,17 @@ def _structured_signals(
             if "company" in joined and ("role" in joined or "tc id" in joined):
                 continue
 
+            industry, tc_id = None, None
             if len(cells) >= 5:
+                industry, tc_id = cells[0], cells[3]
                 company, role_cell, remarks = cells[1], cells[2], " | ".join(cells[4:])
                 last_company = _clean(company) or last_company
             elif len(cells) == 4:
+                tc_id = cells[2]
                 company, role_cell, remarks = cells[0], cells[1], " | ".join(cells[3:])
                 last_company = _clean(company) or last_company
             elif len(cells) == 3 and last_company:
+                tc_id = cells[1]
                 company, role_cell, remarks = last_company, cells[0], cells[2]
             else:
                 continue
@@ -160,6 +164,9 @@ def _structured_signals(
                         source_date=source_date,
                         company=company,
                         role_title=role,
+                        industry=industry,
+                        talentconnect_id=tc_id,
+                        remarks=remarks,
                         location=_location(remarks),
                         opportunity_type=_opportunity_type(section, role, remarks),
                         deadline_hint=_parse_deadline(remarks, source_date),

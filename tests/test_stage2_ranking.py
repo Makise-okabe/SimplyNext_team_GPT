@@ -242,7 +242,7 @@ def test_stage2_caps_fallback_after_retry_failure():
     assert len(llm.calls) == 3
     assert all(not item.semantic_assessed for item in results)
     assert all(item.final_score <= 60.0 for item in results)
-    assert all("missing after retry" in item.missing_or_weak_evidence[0] for item in results)
+    assert all(not item.missing_or_weak_evidence for item in results)  # A service outage is not a student skill gap.
 
 
 def test_stage2_small_batches_use_multiple_calls_without_dropping_candidates():

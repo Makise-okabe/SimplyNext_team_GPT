@@ -113,7 +113,7 @@ def host(url: str | None) -> str:
     if not url:
         return ""
     try:
-        value = urlparse(url).netloc.lower().split(":", 1)[0]
+        value = (urlparse(url).hostname or "").lower()
     except ValueError:
         return ""
     return value[4:] if value.startswith("www.") else value
@@ -121,7 +121,11 @@ def host(url: str | None) -> str:
 
 def is_aggregator_url(url: str | None) -> bool:
     value = host(url)
-    return bool(value and any(marker in value for marker in AGGREGATOR_HOST_MARKERS))
+    return bool(value and any(
+        value == domain or value.endswith("." + domain)
+        for marker in AGGREGATOR_HOST_MARKERS
+        for domain in ([marker] if not marker.endswith(".") else [marker + suffix for suffix in ("com", "com.sg", "sg", "co.uk", "com.au", "co.in", "in", "co.id", "com.my")])
+    ))
 
 
 def is_secondary_url(url: str | None) -> bool:
@@ -187,16 +191,18 @@ def _company_identity_matches_url(url: str | None, company: str | None) -> bool:
     except ValueError:
         return False
 
-    raw = unquote(
-        " ".join(
-            [
-                parsed.netloc.lower(),
-                parsed.path.lower(),
-                parsed.query.lower(),
-                parsed.fragment.lower(),
-            ]
-        )
-    )
+    hostname = (parsed.hostname or "").lower()
+    parts = [part for part in parsed.path.split("/") if part]
+    # ATS tenant/board identity, never a query string or job-title slug.
+    if hostname.endswith((".myworkdayjobs.com", ".workdayjobs.com")):
+        raw = hostname.split(".")[0]
+    elif hostname in {"boards.greenhouse.io", "job-boards.greenhouse.io", "jobs.lever.co", "jobs.smartrecruiters.com"}:
+        raw = parts[0] if parts else ""
+    elif hostname.endswith(".mokahr.com"):
+        raw = parts[1] if len(parts) > 1 else ""
+    else:
+        raw = hostname.split(".")[0]
+    raw = unquote(raw).lower()
     compact = re.sub(r"[^a-z0-9]", "", raw)
     tokens = set(re.findall(r"[a-z0-9]+", raw))
 
@@ -217,16 +223,18 @@ def is_plausible_official_url(url: str | None, company: str | None) -> bool:
     if value in {"careers.example.com", "jobs.example.com"}:
         return True
 
-    if any(marker in value for marker in ATS_HOST_MARKERS):
+    if any(value == marker or value.endswith("." + marker) for marker in ATS_HOST_MARKERS):
         return _company_identity_matches_url(url, company)
 
-    compact_host = re.sub(r"[^a-z0-9]", "", value)
-    host_tokens = set(re.findall(r"[a-z0-9]+", value))
+    parts = value.split(".")
+    brand = parts[-3] if len(parts) >= 3 and parts[-2] in {"com", "co", "org", "net"} else parts[-2] if len(parts) >= 2 else value
+    compact_host = re.sub(r"[^a-z0-9]", "", brand)
+    host_tokens = set(re.findall(r"[a-z0-9]+", brand))
     for alias in _company_aliases(company):
         if len(alias) <= 3:
             if _short_alias_matches_brand_host(alias, compact_host, host_tokens):
                 return True
-        elif alias in compact_host:
+        elif alias == compact_host or compact_host in {alias + "careers", alias + "jobs"}:
             return True
     return False
 

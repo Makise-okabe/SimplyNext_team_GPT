@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, urlparse, parse_qs, unquote
 
 from career_agent.job_research_quality import is_plausible_official_url
 from career_agent.models.job_record import JobRecord
 from career_agent.tools.web_search import SearchResult, search_public_web
+from career_agent.tools.web_fetch import fetch_public_page, public_http_url
+from career_agent.job_page_verifier import apply_page_verification, clear_unverified_links, clean_search_title, verify_job_page
+from career_agent.research_session import current_session
 
 MIN_OFFICIAL_EXACT_TITLE_OVERLAP = 0.65
 MIN_SECONDARY_EXACT_TITLE_OVERLAP = 0.80
@@ -20,7 +23,7 @@ COMPANY_LEGAL_STOPWORDS = {
     "corporation", "corp", "plc", "llc", "singapore", "branch",
 }
 MEANINGFUL_SHORT_TITLE_TOKENS = {
-    "ai", "ml", "ic", "rf", "it", "qa", "ui", "ux", "hr", "3d", "5g",
+    "sr", "ai", "ml", "ic", "rf", "it", "qa", "ui", "ux", "hr", "3d", "5g",
 }
 TITLE_TOKEN_CANONICAL = {
     "engineers": "engineer",
@@ -123,19 +126,19 @@ def _resolver_company_match(company: str | None, identity_text: str) -> bool:
 
 
 def _looks_job_like(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-    except ValueError:
+    if not public_http_url(url):
         return False
-    value = f"{parsed.netloc.lower()} {parsed.path.lower()} {parsed.query.lower()}"
-    return any(
-        marker in value
-        for marker in (
-            "/job/", "/jobs/", "jobdetail", "job-detail", "jobid=", "job_id=",
-            "jobcode=", "requisition", "reqid=", "/position/", "/positions/",
-            "/opening/", "/openings/", "linkedin.com/jobs/view",
-        )
-    )
+    parsed = urlparse(url)
+    path = unquote(parsed.path).lower().rstrip("/")
+    if any(part in path.split("/") for part in ("search", "login", "signin")):
+        return False
+    if path in {"", "/jobs", "/job", "/careers", "/positions", "/openings"}:
+        return False
+    if any(parse_qs(parsed.query).get(key) for key in ("jobId", "jobid", "job_id", "jobCode", "jobcode", "reqid", "gh_jid")):
+        return True
+    if (parsed.hostname or "").endswith(".lever.co"):
+        return len([p for p in path.split("/") if p]) >= 2
+    return bool(re.search(r"/(?:jobs?|positions?|openings?)/[^/]+|/(?:jobdetail|job-detail|requisition)/[^/]+", path))
 
 
 def _career_page_like(url: str) -> bool:
@@ -176,116 +179,113 @@ def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str
     return score, kind, confidence
 
 
-def _existing_resolution(job: JobRecord) -> LinkResolution | None:
-    candidates = [
-        job.job_page_url,
-        job.official_job_url,
-        job.primary_source_url,
-        job.application_url,
-        *job.source_urls,
-        job.secondary_source_url,
-    ]
-    seen: set[str] = set()
-    for url in candidates:
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        result = SearchResult(
-            title=f"{job.company or ''} {job.title or ''}".strip(),
-            url=url,
-            snippet="",
-        )
-        scored = _score_result(job, result)
-        if scored is None:
-            continue
-        _, kind, confidence = scored
-        return LinkResolution(url=url, kind=kind, confidence=confidence, search_query=None, candidate_count=1)
-    return None
-
-
 def _query(company: str, title: str) -> str:
-    return f'"{company}" "{title}" careers job'
+    return f'"{company}" "{clean_search_title(title)}" careers job'
 
 
 def _search_fallback_url(company: str, title: str) -> str:
-    query = f'"{company}" "{title}" jobs'
-    return f"https://www.google.com/search?q={quote_plus(query)}"
+    return f"https://www.google.com/search?q={quote_plus(company + ' ' + title + ' jobs')}"
 
 
 def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
-    existing = _existing_resolution(job)
-    if existing is not None:
-        return _apply_resolution(job, existing), existing
+    """Discover candidates, then verify fetched identity before publishing any URL.
 
-    company = (job.company or "").strip()
-    title = (job.title or "").strip()
-    if not company or not title:
-        unresolved = LinkResolution(None, "unresolved", "low", None, 0)
-        return job.model_copy(update={"search_resolution_status": "not_searched"}), unresolved
+    At most three queries and six destination fetches per role. Failed candidates
+    never remove the original opportunity. Search snippets never certify a page.
+    """
+    session = current_session()
+    company, title = (job.company or "").strip(), (job.title or "").strip()
+    base = clear_unverified_links(job)
+    if not company or not title or job.availability_status in {"expired_by_source_deadline", "closed_by_official"}:
+        return base, LinkResolution(None, "unresolved", "low", None, 0)
+    attempts, tried, fetched = [], set(), 0
+    best_secondary = None
+    closed = None
+    query_used = None
 
-    query = _query(company, title)
-    try:
-        results = search_public_web(query, max_results=8)
-    except Exception:
-        results = []
+    def check(url, query):
+        nonlocal fetched, closed, best_secondary
+        if not public_http_url(url) or url in tried or fetched >= 6:
+            return None
+        tried.add(url)
+        fetched += 1
+        try:
+            page = session.fetch(url, fetch_public_page)
+        except Exception as exc:
+            attempts.append({"url": url, "status": "unavailable", "reason": type(exc).__name__, "query": query})
+            return None
+        verification = verify_job_page(job, page)
+        attempts.append({"url": url, "final_url": page.final_url, "status": verification.status, "reason": verification.reason, "query": query})
+        if verification.status == "verified":
+            resolved = apply_page_verification(base, verification)
+            if verification.kind == "official_exact":
+                return resolved
+            best_secondary = best_secondary or resolved
+        elif verification.status == "closed" and verification.details.get("official"):
+            closed = apply_page_verification(base, verification)
+        # Official career pages are discovery seeds, never application buttons.
+        if verification.status == "generic_page" and is_plausible_official_url(page.final_url, company):
+            links = [link for link in page.links if _looks_job_like(link) and is_plausible_official_url(link, company)]
+            links.sort(key=lambda link: _resolver_title_overlap(title, unquote(link)), reverse=True)
+            for link in links[:2]:
+                if _resolver_title_overlap(clean_search_title(title), unquote(link)) < .5:
+                    continue
+                found = check(link, "employer_page_link")
+                if found:
+                    return found
+        return None
 
-    scored_results: list[tuple[float, SearchResult, str, str]] = []
-    for result in results:
-        scored = _score_result(job, result)
-        if scored is None:
+    def finish(found):
+        found = found.model_copy(update={"link_attempts": attempts})
+        return found, LinkResolution(found.job_page_url, found.job_page_kind, found.job_page_confidence, query_used, len(attempts))
+
+    existing = list(dict.fromkeys(filter(None, [job.job_page_url, job.official_job_url, job.primary_source_url, job.application_url, *job.source_urls, job.secondary_source_url])))
+    existing.sort(key=lambda url: not is_plausible_official_url(url, company))
+    for url in existing[:3]:
+        if not (_looks_job_like(url) or is_plausible_official_url(url, company)):
             continue
-        score, kind, confidence = scored
-        scored_results.append((score, result, kind, confidence))
+        found = check(url, "email_or_existing_link")
+        if found:
+            return finish(found)
+        if closed:
+            return finish(closed)
 
-    if not scored_results:
-        unresolved = LinkResolution(None, "unresolved", "low", query, 0)
-        fallback = _search_fallback_url(company, title)
-        return job.model_copy(
-            update={
-                "job_page_url": None,
-                "job_page_kind": "unresolved",
-                "job_page_confidence": "low",
-                "search_fallback_url": fallback,
-                "search_resolution_status": "search_fallback_only",
-            }
-        ), unresolved
-
-    scored_results.sort(key=lambda item: item[0], reverse=True)
-    _, best, kind, confidence = scored_results[0]
-    resolution = LinkResolution(
-        url=best.url,
-        kind=kind,
-        confidence=confidence,
-        search_query=query,
-        candidate_count=len(scored_results),
-    )
-    return _apply_resolution(job, resolution), resolution
-
-
-def _apply_resolution(job: JobRecord, resolution: LinkResolution) -> JobRecord:
-    if not resolution.url:
-        return job.model_copy(
-            update={
-                "job_page_url": None,
-                "job_page_kind": "unresolved",
-                "job_page_confidence": "low",
-            }
-        )
-
-    update = {
-        "job_page_url": resolution.url,
-        "job_page_kind": resolution.kind,
-        "job_page_confidence": resolution.confidence,
-        "search_resolution_status": "resolved_job_page",
-    }
-    if resolution.kind.startswith("official"):
-        update["primary_source_url"] = resolution.url
-        update["official_job_url"] = resolution.url
-        update["application_url"] = job.application_url or resolution.url
-    elif resolution.kind.startswith("secondary"):
-        update["secondary_source_url"] = resolution.url
-        update["application_url"] = job.application_url or resolution.url
-    elif resolution.kind == "company_careers":
-        update["primary_source_url"] = resolution.url
-        update["official_job_url"] = resolution.url
-    return job.model_copy(update=update)
+    cleaned = clean_search_title(title)
+    queries = [_query(company, title), f'"{company}" {cleaned} careers Singapore', f'"{company}" {cleaned} job']
+    if job.location and "singapore" not in job.location.lower():
+        queries[1] = f'"{company}" {cleaned} careers {job.location}'
+    official_hosts = list(dict.fromkeys(urlparse(u).hostname for u in existing if is_plausible_official_url(u, company)))
+    if official_hosts:
+        queries[1] = f'site:{official_hosts[0]} {cleaned}'
+    if job.job_id:
+        queries.insert(0, f'"{company}" "{job.job_id}"')
+    for query_used in list(dict.fromkeys(queries))[:3]:
+        results = session.search(query_used, search_public_web)
+        scored = []
+        for result in results:
+            score = _score_result(job, result)
+            # Weak/missing search titles can hide a valid official posting.
+            # Fetched content is still mandatory and authoritative.
+            if score or (is_plausible_official_url(result.url, company) and _looks_job_like(result.url)):
+                scored.append(((score[0] if score else 0), result))
+        scored.sort(key=lambda item: (not is_plausible_official_url(item[1].url, company), -item[0]))
+        for _, result in scored:
+            found = check(result.url, query_used)
+            if found:
+                return finish(found)
+            if closed:
+                return finish(closed)
+        if best_secondary or fetched >= 6:
+            break
+    if best_secondary:
+        return finish(best_secondary)
+    from datetime import datetime, timezone
+    unresolved = base.model_copy(update={
+        "search_fallback_url": _search_fallback_url(company, title),
+        "search_resolution_status": "search_fallback_only",
+        "link_verification_status": "unresolved",
+        "link_verification_reason": "No destination passed company, role and availability checks",
+        "link_checked_at": datetime.now(timezone.utc).isoformat(),
+        "link_attempts": attempts,
+    })
+    return unresolved, LinkResolution(None, "unresolved", "low", query_used, len(attempts))

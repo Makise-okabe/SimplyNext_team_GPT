@@ -115,3 +115,28 @@ def test_related_jobs_are_ranked_separately_from_email_jobs(monkeypatch):
     assert len(result.related_jobs) == 1
     assert result.related_jobs[0]["source_key"] == "web_discovered"
     assert result.related_rankings[0]["company"] == "AI Co"
+
+
+def test_parallel_research_keeps_rankings_and_counts(monkeypatch):
+    from threading import Barrier
+    from career_agent.research_session import current_session
+    barrier = Barrier(3)
+    jobs = [_job('AI Co', 'AI Engineer'), _job('Embed Co', 'Embedded Engineer'),
+            _job('Chip Co', 'Semiconductor Engineer')]
+    def resolve(job):
+        barrier.wait(timeout=3)
+        session = current_session()
+        session.search_calls += 1
+        session.fetch_calls += 2
+        return job, LinkResolution(None, 'unresolved', 'low', None, 0)
+    monkeypatch.setenv('SIMPLYNEXT_WEB_WORKERS', '3')
+    monkeypatch.setattr(opportunity_agent, 'resolve_job_link', resolve)
+    monkeypatch.setattr(opportunity_agent, 'enrich_job_description', lambda job: job)
+    monkeypatch.setattr(opportunity_agent, 'discover_related_jobs',
+                        lambda **kwargs: ([], RelatedDiscoveryMetrics(0, 0, 0)))
+    result = run_opportunity_agent(student_profile=_student(), jobs=jobs,
+                                   web_primary_count=3, web_exploration_count=0)
+    assert result.metrics.search_calls == 3
+    assert result.metrics.page_fetch_calls == 6
+    assert [job['company'] for job in result.jobs] == [job['company'] for job in jobs]
+    assert len(result.stage1_rankings) == 3

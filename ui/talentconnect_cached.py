@@ -4,6 +4,9 @@ import hashlib
 import json
 import os
 import time
+from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from career_agent.batch_sources import SOURCE_DOCUMENT_SEPARATOR
@@ -13,6 +16,25 @@ from career_agent.talentconnect_extraction import ExtractionMetrics, _chunks, _i
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CACHE_DIR = PROJECT_ROOT / ".cache" / "ui_talentconnect_chunks_v1"
 CACHE_VERSION = "talentconnect-prompt-v1"
+
+
+@dataclass
+class ExtractionState:
+    rate_limited: bool = False
+
+
+def _retry_delay(exc: Exception, fallback: float) -> float:
+    headers = getattr(getattr(exc, "response", None), "headers", {}) or {}
+    value = headers.get("retry-after") or headers.get("Retry-After")
+    if value is None:
+        return fallback
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            return max(0.0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError):
+            return fallback
 
 
 def _normalize(value: str | None) -> str:
@@ -56,9 +78,9 @@ def _is_rate_limit(exc: Exception) -> bool:
 
 def _invoke_with_retry(chunk: str) -> tuple[ExtractedOpportunityBatch | None, int, str | None]:
     """Pace new chunks and retry rate limits without redoing successful chunks."""
-    max_attempts = max(1, int(os.getenv("SIMPLYNEXT_TC_MAX_ATTEMPTS", "4")))
+    max_attempts = max(1, int(os.getenv("SIMPLYNEXT_TC_MAX_ATTEMPTS", "2")))
     base_wait = max(1.0, float(os.getenv("SIMPLYNEXT_TC_RETRY_SECONDS", "8")))
-    pace = max(0.0, float(os.getenv("SIMPLYNEXT_TC_PACE_SECONDS", "2.5")))
+    pace = max(0.0, float(os.getenv("SIMPLYNEXT_TC_PACE_SECONDS", "0")))
 
     attempts = 0
     last_error: Exception | None = None
@@ -72,8 +94,10 @@ def _invoke_with_retry(chunk: str) -> tuple[ExtractedOpportunityBatch | None, in
             last_error = exc
             if not _is_rate_limit(exc) or attempt >= max_attempts:
                 break
-            # 8s, 16s, 32s by default. Only the failed chunk waits/retries.
-            time.sleep(base_wait * (2 ** (attempt - 1)))
+            delay = _retry_delay(exc, base_wait * (2 ** (attempt - 1)))
+            if delay > 10.0:
+                break
+            time.sleep(delay)
 
     if last_error is None:
         return None, attempts, "unknown extraction failure"
@@ -86,6 +110,7 @@ def extract_talentconnect_cached(
     source_message_id: str,
     source_date,
     corpus: str,
+    state: ExtractionState | None = None,
 ) -> tuple[list[OpportunitySignal], ExtractionMetrics, list[str]]:
     """Frozen TalentConnect extraction semantics with UI-only per-chunk memoization.
 
@@ -93,6 +118,7 @@ def extract_talentconnect_cached(
     plus a prompt-version token, so changed/new mail is automatically re-extracted.
     Only successful structured LLM outputs are cached; failed/429 chunks are never cached.
     """
+    state = state if state is not None else ExtractionState()
     merged: dict[tuple[str, str], OpportunitySignal] = {}
     errors: list[str] = []
     actual_calls = 0
@@ -115,9 +141,14 @@ def extract_talentconnect_cached(
             if batch is not None:
                 cache_hits += 1
             else:
+                if state.rate_limited:
+                    errors.append(f"TalentConnect document {document_index} chunk {chunk_index} deferred: provider rate limit; retry scan later.")
+                    continue
                 batch, attempts, error = _invoke_with_retry(chunk)
                 actual_calls += attempts
                 if batch is None:
+                    if error and _is_rate_limit(RuntimeError(error)):
+                        state.rate_limited = True
                     errors.append(
                         f"TalentConnect document {document_index} chunk {chunk_index} failed after "
                         f"{attempts} attempt(s): {error}"

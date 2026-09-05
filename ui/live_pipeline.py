@@ -5,7 +5,7 @@ import json
 import os
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Callable
@@ -24,7 +24,7 @@ from career_agent.matching_dataset import (
     sanitize_job_sources,
 )
 from career_agent.models.job_record import JobRecord
-from ui.talentconnect_cached import extract_talentconnect_cached
+from ui.talentconnect_cached import ExtractionState, extract_talentconnect_cached
 
 ProgressCallback = Callable[[str], None]
 
@@ -41,6 +41,7 @@ class LiveInboxBuild:
     candidate_source_counts: dict[str, int]
     extraction_llm_calls: int
     source_index: dict[tuple[str, str], dict]
+    extraction_warnings: list[str] = field(default_factory=list)
 
 
 def _key(company: str | None, title: str | None) -> tuple[str, str]:
@@ -97,7 +98,7 @@ def _no_llm_goh_base_extractor(**kwargs):
     return [], ExtractionMetrics(llm_calls=0, source_chars=len(corpus)), []
 
 
-def _extract_email(source: str, email):
+def _extract_email(source: str, email, *, extraction_state=None):
     corpus, _source_links, _documents, warnings = build_source_corpus(
         email,
         fetch_linked_pdfs=True,
@@ -114,7 +115,7 @@ def _extract_email(source: str, email):
             **kwargs,
             base_extractor=_no_llm_goh_base_extractor,
         )
-        if len(signals) < 10:
+        if not signals:
             fallback_signals, fallback_metrics, fallback_errors = extract_goh_opportunities(
                 **kwargs,
                 base_extractor=_fresh_goh_base_extractor,
@@ -126,7 +127,7 @@ def _extract_email(source: str, email):
     else:
         # Same TalentConnect extraction semantics, but successful chunks are memoized
         # by exact content hash and rate-limited chunks are paced/retried.
-        signals, metrics, errors = extract_talentconnect_cached(**kwargs)
+        signals, metrics, errors = extract_talentconnect_cached(**kwargs, state=extraction_state)
     return signals, metrics, [*warnings, *errors]
 
 
@@ -147,6 +148,10 @@ def _signal_to_source_job(source: str, email, signal) -> JobRecord:
         source_subject=email.subject,
         company=signal.company,
         title=signal.role_title,
+        industry=signal.industry,
+        talentconnect_id=signal.talentconnect_id,
+        remarks=signal.remarks,
+        source_provenance=[{"source_key": source, "message_id": email.message_id, "subject": email.subject}],
         location=signal.location,
         opportunity_type=signal.opportunity_type,
         deadline_hint=signal.deadline_hint,
@@ -205,6 +210,8 @@ def build_live_matching_candidates(
 
     raw_jobs: list[JobRecord] = []
     extraction_llm_calls = 0
+    extraction_warnings = []
+    extraction_state = ExtractionState()
 
     for email_index, email in enumerate(unique_messages, start=1):
         source = _source_key(email.sender_email)
@@ -215,8 +222,9 @@ def build_live_matching_candidates(
                 f"[EMAIL {email_index:02}/{len(unique_messages):02}] {source} — extracting opportunities"
             )
 
-        signals, metrics, messages = _extract_email(source, email)
+        signals, metrics, messages = _extract_email(source, email, extraction_state=extraction_state)
         extraction_llm_calls += int(metrics.llm_calls)
+        extraction_warnings.extend(str(message) for message in messages if not str(message).startswith("INFO "))
 
         kept = 0
         for signal in signals:
@@ -231,7 +239,7 @@ def build_live_matching_candidates(
             progress(
                 f"    -> {kept} concrete opportunity signal(s); actual LLM attempts={metrics.llm_calls}"
             )
-            for message in messages[:3]:
+            for message in messages:
                 normalized = " ".join(str(message).split())[:220]
                 if normalized.startswith("INFO "):
                     progress(f"       {normalized}")
@@ -255,6 +263,8 @@ def build_live_matching_candidates(
     payload = {
         "schema": "simplinext.matching_candidates.v1",
         "purpose": "Ephemeral live-Outlook extraction input for the frozen career opportunity runner.",
+        "extraction_complete": not extraction_warnings,
+        "extraction_warnings": extraction_warnings,
         "job_count": len(candidates),
         "jobs": candidates,
     }
@@ -283,4 +293,5 @@ def build_live_matching_candidates(
         candidate_source_counts=dict(candidate_source_counts),
         extraction_llm_calls=extraction_llm_calls,
         source_index=source_index,
+        extraction_warnings=extraction_warnings,
     )

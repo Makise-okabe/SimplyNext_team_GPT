@@ -4,6 +4,7 @@ from career_agent.tools.web_search import SearchResult
 
 def test_aggregated_search_keeps_later_provider_results(monkeypatch):
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     calls: list[str] = []
 
     generic = SearchResult(

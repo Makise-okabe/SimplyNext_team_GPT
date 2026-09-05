@@ -2,6 +2,7 @@ from career_agent import stage2_ranking
 from career_agent.stage2_ranking import (
     SemanticAssessment,
     SemanticAssessmentBatch,
+    build_stage2_prompt,
     rerank_stage1,
 )
 
@@ -93,6 +94,25 @@ def _assessment(index: int, score: float = 80) -> SemanticAssessment:
         missing_or_weak_evidence=[],
         confidence="medium",
     )
+
+
+def test_stage2_receives_email_context_and_verified_web_jd_together():
+    ranked = [_stage1()[0]]
+    source = [_jobs()[0] | {
+        "matching_evidence_level": "full_jd",
+        "source_evidence": "NUS email: Chip Design Engineer, TC ID 1234",
+        "jd_text": "Official JD: design analog and digital semiconductor circuits.",
+    }]
+    prompt = build_stage2_prompt(
+        resume_text="Cadence and semiconductor experience",
+        student_profile=_student(),
+        stage1_top=ranked,
+        source_jobs=source,
+    )
+    assert "NUS email: Chip Design Engineer, TC ID 1234" in prompt
+    assert "Official JD: design analog and digital semiconductor circuits." in prompt
+    assert '"email_evidence"' in prompt
+    assert '"verified_web_job_description"' in prompt
 
 
 def test_stage2_batches_candidates_and_semantic_score_drives_order():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -27,6 +28,9 @@ BING_RSS_URL = "https://www.bing.com/search?format=rss"
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 DUCKDUCKGO_LITE_URL = "https://lite.duckduckgo.com/lite/"
 SEARCH_TIMEOUT_SECONDS = 6.0
+GROQ_SEARCH_TIMEOUT_SECONDS = 15.0
+GROQ_WEB_SEARCH_MODEL = "groq/compound-mini"
+LOGGER = logging.getLogger(__name__)
 SITE_PATTERN = re.compile(r"(?i)(?:^|\s)site:([^\s\"']+)")
 QUOTED_PATTERN = re.compile(r'"([^\"]+)"')
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
@@ -38,7 +42,11 @@ QUERY_STOPWORDS = {
 
 def stable_search_api_name() -> str | None:
     """Return the configured stable web-search API, if any."""
-    return "tavily" if os.getenv("TAVILY_API_KEY", "").strip() else None
+    if os.getenv("TAVILY_API_KEY", "").strip():
+        return "tavily"
+    if os.getenv("GROQ_API_KEY", "").strip():
+        return "groq_compound_web_search"
+    return None
 
 
 def _unwrap_duckduckgo_url(href: str) -> str:
@@ -244,6 +252,64 @@ def _search_tavily(query: str, max_results: int) -> list[SearchResult]:
     return results
 
 
+def _groq_search_result_items(message) -> list:
+    """Read only grounded URLs returned by Groq's executed web-search tool."""
+    items: list = []
+    for tool in getattr(message, "executed_tools", None) or []:
+        search_results = getattr(tool, "search_results", None)
+        if search_results is None and isinstance(tool, dict):
+            search_results = tool.get("search_results")
+        if isinstance(search_results, dict):
+            items.extend(search_results.get("results") or [])
+        else:
+            items.extend(getattr(search_results, "results", None) or [])
+    return items
+
+
+def _search_groq(query: str, max_results: int) -> list[SearchResult]:
+    """Use the configured Groq key for server-side live web search."""
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    if not api_key:
+        return []
+
+    from groq import Groq
+
+    client = Groq(
+        api_key=api_key,
+        timeout=GROQ_SEARCH_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+    completion = client.chat.completions.create(
+        model=os.getenv("GROQ_WEB_SEARCH_MODEL", GROQ_WEB_SEARCH_MODEL).strip() or GROQ_WEB_SEARCH_MODEL,
+        messages=[{
+            "role": "user",
+            "content": (
+                "Use live web search for this exact query and return the relevant source results. "
+                "This is job-page discovery; prioritize the employer's official job-detail page "
+                "or official ATS page over LinkedIn and other job boards. Query: " + query
+            ),
+        }],
+        compound_custom={"tools": {"enabled_tools": ["web_search"]}},
+        search_settings={"country": "singapore"},
+        temperature=0,
+    )
+    message = completion.choices[0].message
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+    for item in _groq_search_result_items(message):
+        getter = item.get if isinstance(item, dict) else lambda key, default="": getattr(item, key, default)
+        _append_result(
+            results,
+            seen,
+            title=str(getter("title") or ""),
+            href=str(getter("url") or ""),
+            snippet=str(getter("content") or ""),
+        )
+        if len(results) >= max_results:
+            break
+    return results
+
+
 def _parse_bing_results(html: str, max_results: int) -> list[SearchResult]:
     soup = BeautifulSoup(html, "html.parser")
     results: list[SearchResult] = []
@@ -409,8 +475,23 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
             )
             if tavily_results:
                 return tavily_results
-        except Exception:
-            pass
+        except Exception as exc:
+            LOGGER.warning("Tavily web search failed (%s): %s", type(exc).__name__, exc)
+
+    if os.getenv("GROQ_API_KEY", "").strip():
+        for variant in variants:
+            try:
+                groq_results = _filter_results(
+                    _search_groq(variant, max_results),
+                    original_query=query,
+                    constraint=constraint,
+                    max_results=max_results,
+                )
+                if groq_results:
+                    return groq_results
+            except Exception as exc:
+                LOGGER.warning("Groq web search failed (%s): %s", type(exc).__name__, exc)
+                break
 
     providers = (
         (BING_URL, _parse_bing_results),

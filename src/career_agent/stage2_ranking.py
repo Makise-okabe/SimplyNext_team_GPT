@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 MAX_RESUME_CHARS = 6000
 MAX_JOB_EVIDENCE_CHARS = 1800
+MAX_EMAIL_EVIDENCE_CHARS = 900
 MAX_RELEVANT_COURSES = 16
 LLM_TIMEOUT_SECONDS = 45.0
 LLM_MAX_RETRIES = 1
@@ -115,15 +116,18 @@ def _course_summary(student_profile: dict, relevant_skills: set[str] | None = No
     return compact
 
 
-def _job_evidence(job: dict) -> str:
+def _email_evidence(job: dict) -> str:
+    text = str(job.get("source_evidence") or "").strip()
+    if not text:
+        text = str(job.get("matching_input_text") or "").strip()
+    return text[:MAX_EMAIL_EVIDENCE_CHARS]
+
+
+def _web_job_description(job: dict) -> str:
     evidence_level = str(job.get("matching_evidence_level") or "source_only")
-    if evidence_level in {"full_jd", "partial_jd"} and str(job.get("jd_text") or "").strip():
-        text = str(job.get("jd_text") or "")
-    else:
-        text = str(job.get("source_evidence") or "").strip()
-        if not text:
-            text = str(job.get("matching_input_text") or "").strip()
-    return text[:MAX_JOB_EVIDENCE_CHARS]
+    if evidence_level not in {"full_jd", "partial_jd"}:
+        return ""
+    return str(job.get("jd_text") or "").strip()[:MAX_JOB_EVIDENCE_CHARS]
 
 
 def build_stage2_prompt(
@@ -153,7 +157,8 @@ def build_stage2_prompt(
                 "inferred_job_skills": ranked.get("inferred_job_skills") or [],
                 "location": job.get("location"),
                 "opportunity_type": job.get("opportunity_type"),
-                "job_evidence": _job_evidence(job),
+                "email_evidence": _email_evidence(job),
+                "verified_web_job_description": _web_job_description(job),
             }
         )
 
@@ -172,6 +177,8 @@ Return one JSON object: {{"assessments": [ ... ]}}. Do not browse or discover jo
 RULES:
 - Resume facts are strongest evidence. Course-derived skills are supporting evidence.
 - Job evidence strength: full JD > partial JD > trusted email/source-only context.
+- Use both `email_evidence` and `verified_web_job_description` when both are present.
+- Treat the web JD as employer requirements and the email as source/provenance context; do not discard either.
 - `inferred_job_skills` are hypotheses from the title, never employer-stated requirements.
 - Do not invent student skills, employer requirements, certifications, tools, or experience.
 - Judge role-family fit first; generic communication/leadership/data overlap cannot rescue a role mismatch.

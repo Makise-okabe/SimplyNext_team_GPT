@@ -62,9 +62,7 @@ def main() -> None:
     args = parser.parse_args()
 
     provider = stable_search_api_name()
-    print("SIMPLYNEXT SEARCH CONFIG")
-    print(f"Stable Search API : {provider or 'NOT configured'}")
-    print("Fallback Search   : Bing/DDG public scraping")
+    print(f"[SEARCH] Provider: {provider or 'NOT configured (Bing/DDG fallback only)'}")
     print()
 
     resume_path = Path(args.resume)
@@ -98,7 +96,8 @@ def main() -> None:
         "      web summary: "
         f"selected={m.web_selected} links={m.links_resolved}/{m.web_selected} "
         f"official={m.official_links} secondary={m.secondary_links} "
-        f"fallback={fallback_only} unresolved={m.unresolved_links}"
+        f"fallback={fallback_only} unresolved={m.unresolved_links} "
+        f"searches={m.search_calls} pages_checked={m.page_fetch_calls}"
     )
     print(f"      JD summary : full={m.full_jd} partial={m.partial_jd}")
 

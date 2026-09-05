@@ -1,4 +1,5 @@
 import base64
+from types import SimpleNamespace
 from urllib.parse import quote
 
 from career_agent.job_research_quality import host
@@ -101,6 +102,7 @@ def test_site_constraint_filters_wrong_domain_results() -> None:
 def test_site_scoped_search_falls_through_until_provider_returns_matching_domain(monkeypatch) -> None:
     calls: list[str] = []
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     def fake_request(url, query, *, parser, max_results, headers):
         calls.append(url)
@@ -136,6 +138,7 @@ def test_site_scoped_search_falls_through_until_provider_returns_matching_domain
 def test_site_search_retries_relaxed_query_but_keeps_site_filter(monkeypatch) -> None:
     queries: list[str] = []
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
     def fake_request(url, query, *, parser, max_results, headers):
         queries.append(query)
@@ -198,6 +201,40 @@ def test_optional_tavily_provider_is_preferred_and_site_filtered(monkeypatch) ->
     assert [item.url for item in results] == [
         "https://www.linkedin.com/jobs/view/987654"
     ]
+
+
+def test_groq_web_search_is_used_when_same_api_key_is_configured(monkeypatch) -> None:
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    official = SearchResult(
+        title="AI Engineer - Reolink",
+        url="https://reolink.com/jobs/123",
+        snippet="Official job description",
+    )
+    monkeypatch.setattr(web_search, "_search_groq", lambda query, max_results: [official])
+    monkeypatch.setattr(
+        web_search,
+        "_request_search",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("public scraping should not run")),
+    )
+    assert web_search.stable_search_api_name() == "groq_compound_web_search"
+    assert web_search.search_public_web('"Reolink" "AI Engineer" careers job') == [official]
+
+
+def test_groq_parser_uses_executed_search_results_not_generated_answer() -> None:
+    message = SimpleNamespace(
+        content="A made-up URL must not be parsed: https://wrong.example/jobs/1",
+        executed_tools=[SimpleNamespace(search_results=SimpleNamespace(results=[
+            SimpleNamespace(
+                title="Electrical Intern - BH Global",
+                url="https://www.bhglobal.com.sg/jobs/electrical-intern/",
+                content="Job scope and requirements",
+            )
+        ]))],
+    )
+    items = web_search._groq_search_result_items(message)
+    assert len(items) == 1
+    assert items[0].url == "https://www.bhglobal.com.sg/jobs/electrical-intern/"
 
 
 def test_host_canonicalizes_www_prefix() -> None:

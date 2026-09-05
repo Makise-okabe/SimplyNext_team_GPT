@@ -317,7 +317,9 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
     if job.job_id:
         queries.insert(0, f'"{company}" "{job.job_id}"')
     for query_used in list(dict.fromkeys(queries))[:3]:
-        results = session.search(query_used, search_public_web)
+        # Inspect the first three search candidates, then verify the destination
+        # itself. Search-result text alone never publishes an official button.
+        results = session.search(query_used, search_public_web)[:3]
         scored = []
         for result in results:
             score = _score_result(job, result)

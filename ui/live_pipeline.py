@@ -114,7 +114,7 @@ def _extract_email(source: str, email):
             **kwargs,
             base_extractor=_no_llm_goh_base_extractor,
         )
-        if len(signals) < 10:
+        if not signals:
             fallback_signals, fallback_metrics, fallback_errors = extract_goh_opportunities(
                 **kwargs,
                 base_extractor=_fresh_goh_base_extractor,
@@ -147,6 +147,10 @@ def _signal_to_source_job(source: str, email, signal) -> JobRecord:
         source_subject=email.subject,
         company=signal.company,
         title=signal.role_title,
+        industry=signal.industry,
+        talentconnect_id=signal.talentconnect_id,
+        remarks=signal.remarks,
+        source_provenance=[{"source_key": source, "message_id": email.message_id, "subject": email.subject}],
         location=signal.location,
         opportunity_type=signal.opportunity_type,
         deadline_hint=signal.deadline_hint,

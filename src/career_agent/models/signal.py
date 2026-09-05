@@ -15,6 +15,9 @@ class OpportunitySignal(BaseModel):
 
     company: str | None = None
     role_title: str | None = None
+    industry: str | None = None
+    talentconnect_id: str | None = None
+    remarks: str = ""
     location: str | None = None
     opportunity_type: OpportunityType = "unknown"
     deadline_hint: date | None = None

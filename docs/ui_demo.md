@@ -1,85 +1,29 @@
-# SimplyNext Hackathon UI
+# SimplyNext UI and verified discovery
 
-The UI is intentionally thin: it does not duplicate or change the frozen Career Opportunity Backend V2. It uploads a resume and transcript, invokes the existing one-command backend runner, then renders its JSON output as an evidence-backed career dashboard.
+The UI scans trusted career emails from the dedicated Outlook inbox, builds a student profile once, and passes it to the career runner. The backend ranks the opportunity pool, researches a bounded shortlist, and exports result cards through a shared verification boundary.
 
-## Local quickstart
-
-From the repository root:
+## Run locally
 
 ```powershell
-git switch feature/hackathon-ui
+git switch feature/trusted-job-discovery
 uv sync
 uv run streamlit run ui/app.py
 ```
 
-Streamlit will print a local URL, normally:
+Existing Outlook authentication, Groq/search configuration, and NUSMods resources are required for a live run. Upload a resume and transcript PDF, then select **Scan Outlook & find matches**.
 
-```text
-http://localhost:8501
-```
+## Job links and evidence
 
-## Prerequisites
+A job button requires a fetched destination whose role, employer, and available identity fields match the email opportunity. Homepages, sign-in pages, wrong roles, closed listings, and insufficient page evidence do not become job buttons. An unverified opportunity stays available for evidence-limited matching.
 
-The same backend prerequisites still apply:
+JSON-LD JobPosting data is extracted before scripts are removed. Public Workday and Greenhouse detail resources are supported for recognized posting URLs. The job description and destination are taken from the same verified result. Ranking cannot restore stale application URLs or reopen a closed posting.
 
-- `.env` contains the existing Groq/search configuration.
-- `data/job_records/latest_matching_candidates.json` exists.
-- The NUSMods database/cache used by the frozen backend is available locally.
+Research is limited to three search queries and six candidate fetches per role. Repeated queries and fetches are reused within a run. The UI does not run a separate link-rescue search or rebuild the student profile in the subprocess.
 
-The `data/` directory stays gitignored because it contains generated/local pipeline state.
+The results show a shortlist, a searchable opportunity pool, source information, fit evidence, gaps, and link status. Different known job IDs, TalentConnect IDs, or locations remain separate during consolidation and ranking lookup.
 
-To point the UI at a different generated job catalogue without changing code:
+## Validation and remaining checks
 
-```powershell
-$env:SIMPLYNEXT_JOBS_PATH="data/job_records/latest_matching_candidates.json"
-uv run streamlit run ui/app.py
-```
+Run `uv run pytest -q`. Regression coverage includes structured job data, misleading destinations, stale result aliases, closed postings, duplicate identities, and per-run fetch reuse. Streamlit AppTest can exercise landing/results rendering without mailbox access.
 
-## Demo flow
-
-1. Open the landing page.
-2. Upload a resume PDF.
-3. Upload a transcript PDF.
-4. Click **Find my opportunities**.
-5. The UI shows four backend phases as human-readable progress:
-   - student profile construction,
-   - rough ranking + targeted web enrichment,
-   - semantic fit validation,
-   - related-role discovery.
-6. The results dashboard shows:
-   - profile/course/skill counts,
-   - backend pipeline metrics,
-   - top match scores,
-   - why-match explanations,
-   - matched skills,
-   - supporting vs missing evidence,
-   - View Job / Company Careers / Search Job actions,
-   - You May Also Like recommendations.
-
-## Judge-facing product behavior
-
-The CTA intentionally reflects link quality:
-
-- **View Job**: sufficiently confident job-specific page.
-- **Company Careers**: a real company/careers destination exists but is not treated as an exact posting.
-- **Search Job**: no reliable exact URL; the UI falls back to a search instead of pretending a link is exact.
-
-This keeps the product aligned with the backend's confidence model and prevents the UI from reintroducing the wrong-link problem that the backend regression tests were designed to catch.
-
-## Architecture boundary
-
-```text
-Streamlit UI
-    |
-    | uploads PDFs
-    v
-scripts/run_career_opportunity_agent.py   (frozen backend contract)
-    |
-    v
-data/matching/career_opportunity_agent.json
-    |
-    v
-UI cards / evidence / links / related roles
-```
-
-The UI branch should not change matching weights, scraping logic, semantic prompts, extraction logic, or URL resolution rules.
+These deterministic checks do not measure live retrieval quality. Before the demo, run the real inbox workflow and manually inspect the returned destinations for the correct employer, role, location, and application availability. Record resolved links versus researched roles, JD coverage, and runtime. Browser visual review and live end-to-end verification remain necessary.

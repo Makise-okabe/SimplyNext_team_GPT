@@ -1,3 +1,14 @@
+import pytest
+from career_agent.tools.web_fetch import FetchedPage
+
+@pytest.fixture(autouse=True)
+def fetched_search_destinations(monkeypatch):
+    # Search metadata alone is no longer enough: these positive cases supply a page.
+    def fetch(url, **kwargs):
+        title = "AI Engineering role - Reolink" if "654321" in url else "AI Engineer - Reolink"
+        return FetchedPage(url, url, 200, title, title + "\nResponsibilities\n" + "Build machine learning systems with Python. " * 20 + "\nRequirements\nEngineering degree.")
+    monkeypatch.setattr(job_link_resolver, "fetch_public_page", fetch)
+
 from career_agent import job_link_resolver
 from career_agent.job_link_resolver import resolve_job_link
 from career_agent.models.job_record import JobRecord

@@ -6,8 +6,10 @@ from career_agent.models.job_record import JobRecord
 JD_RANK = {
     "unavailable": 0,
     "source_context_only": 1,
-    "fetched_secondary": 2,
-    "fetched_official": 3,
+    "partial_secondary": 2,
+    "partial_official": 3,
+    "fetched_secondary": 4,
+    "fetched_official": 5,
 }
 STATUS_RANK = {
     "unresolved": 0,
@@ -19,6 +21,10 @@ CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
 def _same_job(left: JobRecord, right: JobRecord) -> bool:
+    for field in ("job_id", "talentconnect_id", "location"):
+        a, b = getattr(left, field), getattr(right, field)
+        if a and b and str(a).strip().casefold() != str(b).strip().casefold():
+            return False
     if canonical_company_text(left.company) != canonical_company_text(right.company):
         return False
     if left.opportunity_type != right.opportunity_type and "unknown" not in {
@@ -41,6 +47,22 @@ def _strength(job: JobRecord) -> tuple[int, int, int, int]:
         CONFIDENCE_RANK.get(job.research_confidence, 0),
         1 if job.primary_source_url else 0,
     )
+
+
+def _provenance(*jobs):
+    entries = []
+    for job in jobs:
+        for entry in job.source_provenance or [{"source_key": job.source_key, "message_id": job.source_message_id, "subject": job.source_subject}]:
+            if entry not in entries:
+                entries.append(entry)
+    return entries
+
+
+def _verified_fields(*jobs):
+    verified = next((job for job in jobs if job.link_verification_status == "verified" and job.job_page_url), None)
+    if verified is None:
+        return {}
+    return {name: getattr(verified, name) for name in ("job_page_url", "job_page_kind", "job_page_confidence", "link_verification_status", "link_checked_at", "link_verification_reason", "link_attempts", "search_resolution_status", "official_job_url", "application_url", "primary_source_url", "secondary_source_url", "jd_source_url", "jd_text", "jd_status", "responsibilities", "required_skills", "preferred_skills", "qualifications")}
 
 
 def _merge_pair(left: JobRecord, right: JobRecord) -> JobRecord:
@@ -74,6 +96,11 @@ def _merge_pair(left: JobRecord, right: JobRecord) -> JobRecord:
             "company": clean_company_name(winner.company) or clean_company_name(other.company),
             "title": title,
             "location": winner.location or other.location,
+            "industry": winner.industry or other.industry,
+            "talentconnect_id": winner.talentconnect_id or other.talentconnect_id,
+            "job_id": winner.job_id or other.job_id,
+            "remarks": winner.remarks or other.remarks,
+            "source_provenance": _provenance(left, right),
             "opportunity_type": opportunity_type,
             "deadline_hint": winner.deadline_hint or other.deadline_hint,
             "availability_status": availability,
@@ -95,6 +122,7 @@ def _merge_pair(left: JobRecord, right: JobRecord) -> JobRecord:
             "evidence_summary": merged_evidence,
             "warnings": list(dict.fromkeys([*winner.warnings, *other.warnings])),
             "errors": list(dict.fromkeys([*winner.errors, *other.errors])),
+            **_verified_fields(winner, other),
         }
     )
 

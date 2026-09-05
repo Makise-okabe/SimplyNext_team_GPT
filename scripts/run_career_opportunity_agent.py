@@ -13,6 +13,8 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from career_agent.presentation import job_card
+from career_agent.record_identity import record_key
 from career_agent.opportunity_agent import run_opportunity_agent
 from career_agent.stage2_ranking import rerank_stage1
 from career_agent.student_profile import build_student_profile
@@ -36,14 +38,8 @@ def _write(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _job_lookup(jobs: list[dict]) -> dict[tuple[str, str], dict]:
-    return {
-        (
-            " ".join(str(job.get("company") or "").lower().split()),
-            " ".join(str(job.get("title") or "").lower().split()),
-        ): job
-        for job in jobs
-    }
+def _job_lookup(jobs: list[dict]) -> dict[str, dict]:
+    return {record_key(job): job for job in jobs}
 
 
 def main() -> None:
@@ -51,6 +47,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the SimplyNext Career Opportunity Agent v2.")
     parser.add_argument("--resume", required=True)
     parser.add_argument("--transcript", required=True)
+    parser.add_argument("--profile", help="Reuse the student profile already built by the UI")
     parser.add_argument("--jobs", default=str(DEFAULT_JOBS))
     parser.add_argument("--web-primary", type=int, default=12)
     parser.add_argument("--web-explore", type=int, default=3)
@@ -76,21 +73,12 @@ def main() -> None:
     transcript_text = _pdf_text(transcript_path)
 
     print("[1/4] Building student profile...")
-    profile = build_student_profile(
-        resume_text=resume_text,
-        transcript_text=transcript_text,
-        enrich_modules=True,
-    )
-    profile_payload = {
-        "schema": "simplinext.student_profile.v1",
-        "resume_file": resume_path.name,
-        "transcript_file": transcript_path.name,
-        **profile.to_dict(),
-    }
-    print(
-        f"      modules={len(profile.module_codes)} explicit_skills={len(profile.explicit_skills)} "
-        f"course_skills={len(profile.course_derived_skills)} total_skills={len(profile.all_skills)}"
-    )
+    if args.profile:
+        profile_payload = _load(Path(args.profile))
+    else:
+        profile = build_student_profile(resume_text=resume_text, transcript_text=transcript_text, enrich_modules=True)
+        profile_payload = {"schema": "simplinext.student_profile.v1", "resume_file": resume_path.name, "transcript_file": transcript_path.name, **profile.to_dict()}
+    print(f"      modules={len(profile_payload.get('module_codes', []))} skills={len(profile_payload.get('all_skills', []))}")
 
     print("[2/4] Rough-ranking all email jobs, then enriching only the strongest shortlist...")
     jobs = list((_load(Path(args.jobs)).get("jobs") or []))
@@ -130,54 +118,21 @@ def main() -> None:
 
     lookup = _job_lookup(agent.jobs)
     top_n = min(max(args.top, 0), len(final))
-    final_cards = []
-    for item in final[:top_n]:
-        key = (
-            " ".join(item.company.lower().split()),
-            " ".join(item.title.lower().split()),
-        )
-        job = lookup.get(key, {})
-        final_cards.append(
-            {
-                **item.to_dict(),
-                "job_page_url": job.get("job_page_url") or item.application_url or item.official_job_url,
-                "job_page_kind": job.get("job_page_kind", "unresolved"),
-                "job_page_confidence": job.get("job_page_confidence", "low"),
-                "search_fallback_url": job.get("search_fallback_url"),
-                "search_resolution_status": job.get("search_resolution_status", "not_searched"),
-                "jd_status": job.get("jd_status", "unavailable"),
-                "source_key": job.get("source_key"),
-            }
-        )
-
+    final_cards = [job_card(lookup.get(item.record_id, {}), item.to_dict()) for item in final[:top_n]]
     related_lookup = _job_lookup(agent.related_jobs)
+    main_keys = {card.get("record_id") for card in final_cards}
     related_cards = []
-    main_keys = {
-        (
-            " ".join(str(card.get("company") or "").lower().split()),
-            " ".join(str(card.get("title") or "").lower().split()),
-        )
-        for card in final_cards
-    }
     for item in agent.related_rankings[:8]:
-        key = (
-            " ".join(str(item.get("company") or "").lower().split()),
-            " ".join(str(item.get("title") or "").lower().split()),
-        )
+        key = record_key(item)
         if key in main_keys:
             continue
-        job = related_lookup.get(key, {})
-        related_cards.append(
-            {
-                **item,
-                "job_page_url": job.get("job_page_url") or job.get("application_url"),
-                "jd_status": job.get("jd_status", "unavailable"),
-                "recommendation_reason": "Related role discovered from a company already matching the student well.",
-            }
-        )
+        card = job_card(related_lookup.get(key, {}), item)
+        card["recommendation_reason"] = "Another role from the same company that may fit your background."
+        related_cards.append(card)
+    all_cards = [job_card(lookup.get(record_key(item), {}), item) for item in agent.stage1_rankings]
 
     output = {
-        "schema": "simplinext.career_opportunity_agent.v2",
+        "schema": "simplinext.career_opportunity_agent.v3",
         "resume_file": resume_path.name,
         "transcript_file": transcript_path.name,
         "search": {
@@ -192,7 +147,7 @@ def main() -> None:
         },
         "top_matches": final_cards,
         "related_jobs": related_cards,
-        "all_rankings": agent.stage1_rankings,
+        "all_rankings": all_cards,
     }
     _write(Path(args.output), output)
 

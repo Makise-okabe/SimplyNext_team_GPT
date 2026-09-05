@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+from career_agent.record_identity import record_key
 from career_agent.hybrid_matching import build_job_skill_profile
 
 
@@ -30,6 +31,8 @@ class Stage1RankedJob:
     job_page_kind: str
     job_page_confidence: str
     source_subject: str | None
+    record_id: str = ""
+    assessment_status: str = "estimated"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -104,7 +107,7 @@ def rank_job(student_profile: dict, job: dict) -> Stage1RankedJob:
 
     evidence_level = str(job.get("matching_evidence_level") or job_profile.evidence_level)
     confidence = _confidence(evidence_level, len(job_skills), len(inferred))
-    job_page_url = job.get("job_page_url") or job.get("application_url") or job.get("official_job_url") or job.get("secondary_source_url")
+    job_page_url = job.get("job_page_url")
 
     return Stage1RankedJob(
         company=str(job.get("company") or ""),
@@ -117,12 +120,14 @@ def rank_job(student_profile: dict, job: dict) -> Stage1RankedJob:
         missing_skills=tuple(missing),
         job_skills=tuple(sorted(job_skills)),
         inferred_job_skills=tuple(sorted(inferred)),
-        official_job_url=job.get("official_job_url") or job.get("primary_source_url"),
+        official_job_url=job.get("official_job_url"),
         application_url=job.get("application_url"),
         job_page_url=job_page_url,
         job_page_kind=str(job.get("job_page_kind") or "unresolved"),
         job_page_confidence=str(job.get("job_page_confidence") or "low"),
         source_subject=job.get("source_subject"),
+        record_id=record_key(job),
+        assessment_status="insufficient_information" if not job_skills else "estimated",
     )
 
 

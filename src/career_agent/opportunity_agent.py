@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from functools import wraps
+
+from career_agent.research_session import research_session
+from career_agent.record_identity import record_key
+from career_agent.matching_dataset import is_matching_candidate
 
 from career_agent.jd_enricher import enrich_job_description
 from career_agent.job_link_resolver import resolve_job_link
@@ -21,6 +26,8 @@ class OpportunityAgentMetrics:
     partial_jd: int
     unresolved_links: int
     related_jobs_discovered: int
+    search_calls: int = 0
+    page_fetch_calls: int = 0
 
 
 @dataclass(frozen=True)
@@ -70,7 +77,7 @@ def _select_for_web(
     exploration_count: int,
 ) -> list[dict]:
     primary = list(rankings[: max(primary_count, 0)])
-    selected_keys = {_key(item.get("company"), item.get("title")) for item in primary}
+    selected_keys = {record_key(item) for item in primary}
 
     exploration: list[dict] = []
     for item in rankings[max(primary_count, 0) :]:
@@ -80,7 +87,7 @@ def _select_for_web(
             continue
         if float(item.get("score") or 0.0) <= 0:
             continue
-        key = _key(item.get("company"), item.get("title"))
+        key = record_key(item)
         if key in selected_keys:
             continue
         exploration.append(item)
@@ -89,6 +96,17 @@ def _select_for_web(
     return [*primary, *exploration]
 
 
+def _with_research_session(func):
+    @wraps(func)
+    def run(**kwargs):
+        with research_session() as session:
+            result = func(**kwargs)
+            from dataclasses import replace
+            return replace(result, metrics=replace(result.metrics, search_calls=session.search_calls, page_fetch_calls=session.fetch_calls))
+    return run
+
+
+@_with_research_session
 def run_opportunity_agent(
     *,
     student_profile: dict,
@@ -101,7 +119,7 @@ def run_opportunity_agent(
     progress=None,
 ) -> OpportunityAgentResult:
     """Rank broadly first, then enrich only a small high-value shortlist."""
-    records = [_record(raw) for raw in jobs]
+    records = [job for raw in jobs if is_matching_candidate(job := _record(raw))]
     payloads = [_matching_payload(job) for job in records]
     initial_rankings = [item.to_dict() for item in rank_jobs(student_profile, payloads)]
     web_selection = _select_for_web(
@@ -109,16 +127,16 @@ def run_opportunity_agent(
         primary_count=web_primary_count,
         exploration_count=web_exploration_count,
     )
-    selected_keys = {_key(item.get("company"), item.get("title")) for item in web_selection}
+    selected_keys = {record_key(item) for item in web_selection}
 
-    updated_by_key: dict[tuple[str, str], JobRecord] = {}
+    updated_by_key: dict[str, JobRecord] = {}
     links_resolved = 0
     official_links = 0
     secondary_links = 0
     full_jd = 0
     partial_jd = 0
 
-    selected_records = [job for job in records if _key(job.company, job.title) in selected_keys]
+    selected_records = [job for job in records if job.record_id in selected_keys]
     for index, job in enumerate(selected_records, start=1):
         if progress:
             progress(f"      [WEB {index:02}/{len(selected_records):02}] {job.company} — {job.title}")
@@ -146,10 +164,10 @@ def run_opportunity_agent(
                 progress(f"          JD   -> partial ({enriched.jd_status})")
         elif progress:
             progress("          JD   -> source/title evidence")
-        updated_by_key[_key(job.company, job.title)] = enriched
+        updated_by_key[job.record_id] = enriched
 
-    final_records = [updated_by_key.get(_key(job.company, job.title), job) for job in records]
-    final_payloads = [_matching_payload(job) for job in final_records]
+    final_records = [updated_by_key.get(job.record_id, job) for job in records]
+    final_payloads = [_matching_payload(job) for job in final_records if is_matching_candidate(job)]
     reranked = [item.to_dict() for item in rank_jobs(student_profile, final_payloads)]
     semantic_shortlist = reranked[: max(semantic_shortlist_count, 0)]
 
@@ -161,7 +179,12 @@ def run_opportunity_agent(
         per_company=related_per_company,
         main_shortlist_count=max(semantic_shortlist_count, 0),
     )
-    enriched_related = [enrich_job_description(job) for job in related_records]
+    enriched_related = []
+    for job in related_records:
+        if job.link_verification_status != "verified":
+            job, _ = resolve_job_link(job)
+        if is_matching_candidate(job):
+            enriched_related.append(enrich_job_description(job))
     related_payloads = [_matching_payload(job) for job in enriched_related]
     related_rankings = [item.to_dict() for item in rank_jobs(student_profile, related_payloads)]
 

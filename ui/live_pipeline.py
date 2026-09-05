@@ -25,7 +25,6 @@ from career_agent.matching_dataset import (
 )
 from career_agent.models.job_record import JobRecord
 from career_agent.talentconnect_extraction import extract_talentconnect_opportunities
-from ui.link_rescue import rescue_exact_link
 
 ProgressCallback = Callable[[str], None]
 
@@ -104,6 +103,8 @@ def _extract_email(source: str, email):
         "corpus": corpus,
     }
     if source == "goh_ze_li":
+        # Frozen Goh logic: structured tables are deterministic. LLM is only used
+        # for meaningful non-table residue, not once per company/role.
         signals, metrics, errors = extract_goh_opportunities(
             **kwargs,
             base_extractor=_fresh_goh_base_extractor,
@@ -117,6 +118,9 @@ def _signal_to_source_job(source: str, email, signal) -> JobRecord:
     expired = bool(signal.deadline_hint and signal.deadline_hint < date.today())
     source_urls = list(dict.fromkeys(signal.urls or []))
 
+    # Preserve links already present in the trusted source, but do not browse or
+    # fabricate anything here. The frozen Opportunity Agent will resolve/enrich
+    # only the rough-ranked shortlist later.
     primary = next(
         (url for url in source_urls if is_plausible_official_url(url, signal.company)),
         None,
@@ -154,60 +158,19 @@ def _signal_to_source_job(source: str, email, signal) -> JobRecord:
     )
 
 
-class LazySourceIndex(dict):
-    """Rescue exact links only when the UI asks for a displayed top-match record.
-
-    ``ui.app._attach_source_metadata`` performs one ``get`` per displayed top card.
-    Doing rescue here keeps the sealed runner untouched and avoids researching all
-    100+ candidates. Successful rescue only accepts a verified official_exact or
-    secondary_exact destination from ``ui.link_rescue``.
-    """
-
-    def get(self, key, default=None):
-        raw = super().get(key)
-        if raw is None:
-            return default
-
-        item = dict(raw)
-        already_direct = any(
-            str(item.get(field) or "").strip()
-            for field in ("official_job_url", "primary_source_url", "secondary_source_url")
-        )
-        if already_direct:
-            return item
-
-        company = str(item.get("company") or "").strip()
-        title = str(item.get("title") or "").strip()
-        if not company or not title:
-            return item
-
-        link = rescue_exact_link(company, title)
-        if link is None:
-            return item
-
-        if link.kind == "official_exact":
-            item["primary_source_url"] = link.url
-            item["official_job_url"] = link.url
-            item["application_url"] = item.get("application_url") or link.url
-        elif link.kind == "secondary_exact":
-            item["secondary_source_url"] = link.url
-            item["application_url"] = item.get("application_url") or link.url
-
-        item["research_status"] = "verified_exact_job"
-        item["research_confidence"] = link.confidence
-        item["research_basis"] = f"ui_exact_link_rescue:{link.kind}"
-
-        # Cache the resolved metadata so repeated Streamlit rerenders do not search again.
-        super().__setitem__(key, item)
-        return item
-
-
 def build_live_matching_candidates(
     output_path: Path,
     *,
     progress: ProgressCallback | None = None,
 ) -> LiveInboxBuild:
-    """Scan all trusted Outlook mail, extract broadly, then let the frozen ranker enrich selectively."""
+    """Scan all trusted Outlook mail, extract broadly, then let the frozen ranker enrich selectively.
+
+    This UI adapter intentionally performs NO company-by-company web research.
+    It invokes the existing frozen extractors, consolidator and matching contract,
+    then writes an ephemeral ``--jobs`` input for ``run_career_opportunity_agent.py``.
+    That frozen runner still performs: rough rank all -> web enrich top shortlist ->
+    semantic review top 5 -> related-role discovery.
+    """
     scan_limit = max(1, int(os.getenv("SIMPLYNEXT_UI_EMAIL_SCAN", "999")))
     connector = OutlookGraphConnector()
 
@@ -289,9 +252,9 @@ def build_live_matching_candidates(
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     candidate_source_counts = Counter(str(item.get("source_key") or "unknown") for item in candidates)
-    source_index = LazySourceIndex(
-        {_key(item.get("company"), item.get("title")): item for item in candidates}
-    )
+    # Plain lookup only. Exact-link search/verification happens once, after the
+    # backend has already selected the cards that the UI will actually display.
+    source_index = {_key(item.get("company"), item.get("title")): item for item in candidates}
 
     if progress:
         progress(

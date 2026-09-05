@@ -89,14 +89,12 @@ def main() -> None:
         progress=print,
     )
     m = agent.metrics
-    fallback_only = sum(
-        1 for job in agent.jobs if job.get("search_resolution_status") == "search_fallback_only"
-    )
+    unresolved = sum(1 for job in agent.jobs if not job.get("job_page_url"))
     print(
         "      web summary: "
         f"selected={m.web_selected} links={m.links_resolved}/{m.web_selected} "
         f"official={m.official_links} secondary={m.secondary_links} "
-        f"fallback={fallback_only} unresolved={m.unresolved_links} "
+        f"unresolved={unresolved} "
         f"searches={m.search_calls} pages_checked={m.page_fetch_calls}"
     )
     print(f"      JD summary : full={m.full_jd} partial={m.partial_jd}")
@@ -140,7 +138,7 @@ def main() -> None:
         },
         "metrics": {
             **m.__dict__,
-            "search_fallback_only": fallback_only,
+            "unresolved_job_pages": unresolved,
             "semantic_assessed": semantic_assessed,
             "semantic_shortlist": len(final),
         },
@@ -155,7 +153,7 @@ def main() -> None:
     print(f"Email jobs          : {m.active_jobs}")
     print(f"Web-enriched jobs   : {m.web_selected}")
     print(f"Resolved job links  : {m.links_resolved}/{m.web_selected}")
-    print(f"Search fallbacks    : {fallback_only}")
+    print(f"Unresolved pages    : {unresolved}")
     print(f"Full / partial JDs  : {m.full_jd} / {m.partial_jd}")
     print(f"Semantic assessed   : {semantic_assessed}/{len(final)}")
     print(f"Related discoveries : {m.related_jobs_discovered}")
@@ -169,10 +167,8 @@ def main() -> None:
         print(f"    page     : {card['job_page_kind']} / {card['job_page_confidence']}")
         if card["job_page_url"]:
             print(f"    View Job : {card['job_page_url']}")
-        elif card["search_fallback_url"]:
-            print(f"    Find Job : {card['search_fallback_url']}")
         else:
-            print("    Find Job : <unavailable>")
+            print("    View Job : <exact role page unresolved>")
 
     if related_cards:
         print()

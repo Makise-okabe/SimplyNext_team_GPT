@@ -15,11 +15,11 @@ Forwarded NUS career emails
         |
 Deterministic extraction + canonical job catalog
         |
-Rough ranking of every active email job
+Email-only rough ranking of every active job
         |
-Top 30 + exploration candidates
+Small high-value shortlist
         |
-Job Link Resolver
+AWS AgentCore Web Search + Job Link Resolver
   official/ATS -> secondary -> unresolved
         |
 Best-Effort JD Enricher
@@ -42,6 +42,39 @@ Related Job Discovery
 - **No auto-apply.** The student remains the decision-maker.
 
 ## Main runner
+
+First authenticate through AWS IAM Identity Center. Do not copy temporary access
+keys into source files or commit them to Git:
+
+```powershell
+aws configure sso --profile simplenext-hackathon
+aws sso login --profile simplenext-hackathon
+aws sts get-caller-identity --profile simplenext-hackathon
+```
+
+Use the SSO Start URL and SSO Region shown by the AWS Access Portal. The SSO
+Region identifies IAM Identity Center; it can be `ap-southeast-1` while the
+Bedrock/AgentCore service Region below is `us-east-1`.
+
+Copy `.env.example` to `.env`, then set only the profile name and the non-secret
+AgentCore values produced by the setup command:
+
+```env
+AWS_PROFILE=simplenext-hackathon
+AWS_REGION=us-east-1
+AWS_BEDROCK_REGION=us-east-1
+AWS_BEDROCK_MODEL_ID=amazon.nova-lite-v1:0
+```
+
+Verify Bedrock and create the managed AWS web-search gateway once:
+
+```powershell
+uv run python scripts/check_aws_access.py
+uv run python scripts/setup_aws_agentcore_search.py
+```
+
+Add the printed `AWS_AGENTCORE_GATEWAY_URL` and
+`AWS_AGENTCORE_WEB_SEARCH_TOOL` values to `.env`. Then run:
 
 ```powershell
 uv run python scripts/run_career_opportunity_agent.py `
@@ -74,18 +107,27 @@ It contains UI-ready `top_matches`, `related_jobs`, evidence levels, resolved pa
 - Batched semantic Stage 2 with rate-limit backoff and individual recovery
 - Related-role discovery from high-ranking companies
 
-## AWS deployment path
+## AWS architecture
 
-The local prototype is intentionally portable. The hosted hackathon version can map cleanly to:
+The active AI/search path is AWS-native:
+
+- **Amazon Bedrock Converse** — Nova Lite extraction, job verification and semantic matching
+- **Amazon Bedrock AgentCore Gateway + Web Search Tool** — live URL discovery without Tavily or Groq
+
+The hosted hackathon version can additionally map to:
 
 - **S3** — resume/transcript uploads and generated artifacts
 - **Lambda / API Gateway** — backend workflow endpoints
 - **DynamoDB** — student profiles, canonical jobs and ranking state
-- **Bedrock** — LLM extraction / semantic reasoning where appropriate
 - **Amplify** — web UI hosting
 - **CloudWatch** — logs and workflow diagnostics
 
-AWS credentials and root secrets must never be committed to the repository.
+Use Bedrock on-demand only. Avoid EC2, RDS, NAT Gateway, load balancers,
+OpenSearch and provisioned throughput for the hackathon account. Monitor the
+Innovation Sandbox budget because access can be revoked when the actual budget
+limit is reached.
+
+AWS credentials, SSO caches and root secrets must never be committed to the repository.
 
 ## Architecture
 

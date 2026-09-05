@@ -296,21 +296,22 @@ def test_stage2_small_batches_use_multiple_calls_without_dropping_candidates():
 def test_stage2_build_llm_uses_json_schema_not_function_calling(monkeypatch):
     captured = {}
 
-    class FakeChatGroq:
-        def __init__(self, **kwargs):
-            captured["init"] = kwargs
-
+    class FakeBedrockChat:
         def with_structured_output(self, schema, **kwargs):
             captured["schema"] = schema
             captured["structured"] = kwargs
             return "json-schema-model"
 
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
-    monkeypatch.setattr(stage2_ranking, "ChatGroq", FakeChatGroq)
+    def fake_builder(**kwargs):
+        captured["init"] = kwargs
+        return FakeBedrockChat()
+
+    monkeypatch.setattr(stage2_ranking, "build_bedrock_chat", fake_builder)
 
     model = stage2_ranking._build_llm()
 
     assert model == "json-schema-model"
+    assert captured["init"]["task_model_env"] == "AWS_BEDROCK_STAGE2_MODEL_ID"
     assert captured["schema"] is SemanticAssessmentBatch
     assert captured["structured"]["method"] == "json_schema"
     assert captured["structured"]["strict"] is False

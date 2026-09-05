@@ -74,7 +74,8 @@ def test_resolver_retains_matching_candidate_when_page_blocks_automation(monkeyp
     assert result.url is None
     assert resolved.candidate_job_url == url
     assert resolved.candidate_job_kind == "official_candidate"
-    assert resolved.search_fallback_url.startswith("https://www.google.com/search?")
+    assert resolved.search_fallback_url is None
+    assert resolved.search_resolution_status == "unresolved"
 
 
 def test_resolver_prefers_official_exact(monkeypatch):
@@ -193,4 +194,4 @@ def test_resolver_rejects_probable_secondary_instead_of_guessing(monkeypatch):
     resolved, result = resolve_job_link(_job())
     assert result.url is None
     assert result.kind == "unresolved"
-    assert resolved.search_resolution_status == "search_fallback_only"
+    assert resolved.search_resolution_status == "unresolved"

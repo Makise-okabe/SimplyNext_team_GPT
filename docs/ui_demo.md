@@ -10,7 +10,7 @@ uv sync
 uv run streamlit run ui/app.py
 ```
 
-Existing Outlook authentication, Groq/search configuration, and NUSMods resources are required for a live run. Upload a resume and transcript PDF, then select **Scan Outlook & find matches**.
+Existing Outlook authentication, AWS SSO/Bedrock/AgentCore configuration, and NUSMods resources are required for a live run. Upload a resume and transcript PDF, then select **Scan Outlook & find matches**.
 
 ## Job links and evidence
 

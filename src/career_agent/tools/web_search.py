@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import re
@@ -22,14 +23,12 @@ class SearchResult:
     snippet: str
 
 
-TAVILY_URL = "https://api.tavily.com/search"
 BING_URL = "https://www.bing.com/search"
 BING_RSS_URL = "https://www.bing.com/search?format=rss"
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 DUCKDUCKGO_LITE_URL = "https://lite.duckduckgo.com/lite/"
 SEARCH_TIMEOUT_SECONDS = 6.0
-GROQ_SEARCH_TIMEOUT_SECONDS = 15.0
-GROQ_WEB_SEARCH_MODEL = "groq/compound-mini"
+AWS_SEARCH_TIMEOUT_SECONDS = 20.0
 LOGGER = logging.getLogger(__name__)
 SITE_PATTERN = re.compile(r"(?i)(?:^|\s)site:([^\s\"']+)")
 QUOTED_PATTERN = re.compile(r'"([^\"]+)"')
@@ -42,10 +41,8 @@ QUERY_STOPWORDS = {
 
 def stable_search_api_name() -> str | None:
     """Return the configured stable web-search API, if any."""
-    if os.getenv("TAVILY_API_KEY", "").strip():
-        return "tavily"
-    if os.getenv("GROQ_API_KEY", "").strip():
-        return "groq_compound_web_search"
+    if os.getenv("AWS_AGENTCORE_GATEWAY_URL", "").strip():
+        return "aws_agentcore_web_search"
     return None
 
 
@@ -219,91 +216,104 @@ def _append_result(
     )
 
 
-def _search_tavily(query: str, max_results: int) -> list[SearchResult]:
-    api_key = os.getenv("TAVILY_API_KEY", "").strip()
-    if not api_key:
+def _agentcore_gateway_url() -> str:
+    value = os.getenv("AWS_AGENTCORE_GATEWAY_URL", "").strip().rstrip("/")
+    if value and not value.endswith("/mcp"):
+        value += "/mcp"
+    return value
+
+
+def _agentcore_json_response(response: httpx.Response) -> dict:
+    content_type = response.headers.get("content-type", "").lower()
+    if "application/json" in content_type:
+        return response.json()
+    for line in response.text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        try:
+            payload = json.loads(line[5:].strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise ValueError("AgentCore Gateway returned no JSON-RPC payload")
+
+
+def _search_aws_agentcore(query: str, max_results: int) -> list[SearchResult]:
+    """Call the AWS AgentCore managed Web Search connector through an IAM gateway."""
+    gateway_url = _agentcore_gateway_url()
+    if not gateway_url:
         return []
+
+    try:
+        import boto3
+        from botocore.auth import SigV4Auth
+        from botocore.awsrequest import AWSRequest
+    except ImportError as exc:
+        raise RuntimeError("AWS support is not installed; run `uv sync --extra dev`") from exc
+
+    region = os.getenv("AWS_AGENTCORE_REGION", "us-east-1").strip() or "us-east-1"
+    profile = os.getenv("AWS_PROFILE", "").strip() or None
+    tool_name = (
+        os.getenv("AWS_AGENTCORE_WEB_SEARCH_TOOL", "simplenext-web-search___WebSearch").strip()
+        or "simplenext-web-search___WebSearch"
+    )
+    protocol_version = os.getenv("AWS_AGENTCORE_MCP_VERSION", "2025-11-25").strip()
+    arguments = {"query": query[:200], "maxResults": max(1, min(max_results, 25))}
+    rpc_payload = {
+        "jsonrpc": "2.0",
+        "id": "simplenext-web-search",
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments},
+    }
+    body = json.dumps(rpc_payload, separators=(",", ":")).encode("utf-8")
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        "MCP-Protocol-Version": protocol_version,
+    }
+
+    session = boto3.Session(profile_name=profile, region_name=region)
+    credentials = session.get_credentials()
+    if credentials is None:
+        raise RuntimeError("AWS credentials unavailable; run `aws sso login` and retry")
+    request = AWSRequest(method="POST", url=gateway_url, data=body, headers=headers)
+    SigV4Auth(credentials.get_frozen_credentials(), "bedrock-agentcore", region).add_auth(request)
     response = httpx.post(
-        TAVILY_URL,
-        json={
-            "api_key": api_key,
-            "query": query,
-            "search_depth": "advanced",
-            "max_results": max_results,
-            "include_answer": False,
-            "include_raw_content": False,
-        },
-        timeout=SEARCH_TIMEOUT_SECONDS,
+        gateway_url,
+        content=body,
+        headers=dict(request.headers.items()),
+        timeout=AWS_SEARCH_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
-    payload = response.json()
+    payload = _agentcore_json_response(response)
+    if payload.get("error"):
+        raise RuntimeError(f"AgentCore Web Search error: {payload['error']}")
+
+    result = payload.get("result") or {}
+    nested: dict = {}
+    for block in result.get("content") or []:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        try:
+            candidate = json.loads(block.get("text") or "{}")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            nested = candidate
+            break
+
     results: list[SearchResult] = []
     seen: set[str] = set()
-    for item in payload.get("results", []):
+    for item in nested.get("results") or []:
+        if not isinstance(item, dict):
+            continue
         _append_result(
             results,
             seen,
             title=str(item.get("title") or ""),
             href=str(item.get("url") or ""),
-            snippet=str(item.get("content") or ""),
-        )
-        if len(results) >= max_results:
-            break
-    return results
-
-
-def _groq_search_result_items(message) -> list:
-    """Read only grounded URLs returned by Groq's executed web-search tool."""
-    items: list = []
-    for tool in getattr(message, "executed_tools", None) or []:
-        search_results = getattr(tool, "search_results", None)
-        if search_results is None and isinstance(tool, dict):
-            search_results = tool.get("search_results")
-        if isinstance(search_results, dict):
-            items.extend(search_results.get("results") or [])
-        else:
-            items.extend(getattr(search_results, "results", None) or [])
-    return items
-
-
-def _search_groq(query: str, max_results: int) -> list[SearchResult]:
-    """Use the configured Groq key for server-side live web search."""
-    api_key = os.getenv("GROQ_API_KEY", "").strip()
-    if not api_key:
-        return []
-
-    from groq import Groq
-
-    client = Groq(
-        api_key=api_key,
-        timeout=GROQ_SEARCH_TIMEOUT_SECONDS,
-        max_retries=0,
-    )
-    completion = client.chat.completions.create(
-        model=os.getenv("GROQ_WEB_SEARCH_MODEL", GROQ_WEB_SEARCH_MODEL).strip() or GROQ_WEB_SEARCH_MODEL,
-        messages=[{
-            "role": "user",
-            "content": (
-                "Use live web search for this exact query and return the relevant source results. "
-                "This is job-page discovery; prioritize the employer's official job-detail page "
-                "or official ATS page over LinkedIn and other job boards. Query: " + query
-            ),
-        }],
-        compound_custom={"tools": {"enabled_tools": ["web_search"]}},
-        search_settings={"country": "singapore"},
-        temperature=0,
-    )
-    message = completion.choices[0].message
-    results: list[SearchResult] = []
-    seen: set[str] = set()
-    for item in _groq_search_result_items(message):
-        getter = item.get if isinstance(item, dict) else lambda key, default="": getattr(item, key, default)
-        _append_result(
-            results,
-            seen,
-            title=str(getter("title") or ""),
-            href=str(getter("url") or ""),
-            snippet=str(getter("content") or ""),
+            snippet=str(item.get("text") or ""),
         )
         if len(results) >= max_results:
             break
@@ -465,32 +475,19 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
     constraint = _site_constraint(query)
     variants = _search_variants(query, constraint)
 
-    for variant in variants:
-        try:
-            tavily_results = _filter_results(
-                _search_tavily(variant, max_results),
-                original_query=query,
-                constraint=constraint,
-                max_results=max_results,
-            )
-            if tavily_results:
-                return tavily_results
-        except Exception as exc:
-            LOGGER.warning("Tavily web search failed (%s): %s", type(exc).__name__, exc)
-
-    if os.getenv("GROQ_API_KEY", "").strip():
+    if _agentcore_gateway_url():
         for variant in variants:
             try:
-                groq_results = _filter_results(
-                    _search_groq(variant, max_results),
+                aws_results = _filter_results(
+                    _search_aws_agentcore(variant, max_results),
                     original_query=query,
                     constraint=constraint,
                     max_results=max_results,
                 )
-                if groq_results:
-                    return groq_results
+                if aws_results:
+                    return aws_results
             except Exception as exc:
-                LOGGER.warning("Groq web search failed (%s): %s", type(exc).__name__, exc)
+                LOGGER.warning("AWS AgentCore web search failed (%s): %s", type(exc).__name__, exc)
                 break
 
     providers = (

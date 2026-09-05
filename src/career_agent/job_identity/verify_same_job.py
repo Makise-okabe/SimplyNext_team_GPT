@@ -6,9 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
-from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-
+from career_agent.aws_llm import build_bedrock_chat
 from career_agent.config import Settings
 from career_agent.job_identity.extract_identity import extract_identifiers
 from career_agent.models.email import EmailMessage
@@ -264,10 +262,10 @@ def _source_attachment_match(identity: JobIdentity, email: EmailMessage) -> bool
 
 
 def _build_judge():
-    load_dotenv()
-    if not os.getenv("GROQ_API_KEY"):
-        raise RuntimeError("GROQ_API_KEY is missing from .env")
-    return ChatGroq(model="openai/gpt-oss-120b", temperature=0).with_structured_output(SameJobJudgeOutput)
+    return build_bedrock_chat(
+        task_model_env="AWS_BEDROCK_JUDGE_MODEL_ID",
+        temperature=0,
+    ).with_structured_output(SameJobJudgeOutput)
 
 
 def _judge_ambiguous(

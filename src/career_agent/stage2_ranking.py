@@ -6,9 +6,9 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Callable, Literal
 
-from dotenv import load_dotenv
-from langchain_groq import ChatGroq
 from pydantic import BaseModel, Field
+
+from career_agent.aws_llm import build_bedrock_chat
 
 MAX_RESUME_CHARS = 6000
 MAX_JOB_EVIDENCE_CHARS = 1800
@@ -16,7 +16,7 @@ MAX_EMAIL_EVIDENCE_CHARS = 900
 MAX_RELEVANT_COURSES = 16
 LLM_TIMEOUT_SECONDS = 45.0
 LLM_MAX_RETRIES = 1
-LLM_MODEL = "openai/gpt-oss-20b"
+LLM_MODEL = "amazon.nova-lite-v1:0"
 STAGE2_BATCH_SIZE = 10
 STAGE2_RATE_LIMIT_ATTEMPTS = 3
 STAGE2_RATE_LIMIT_FALLBACK_SECONDS = 5.0
@@ -69,12 +69,8 @@ class Stage2RankedJob:
 
 
 def _build_llm():
-    load_dotenv()
-    if not os.getenv("GROQ_API_KEY"):
-        raise RuntimeError("GROQ_API_KEY is missing from .env")
-    model_name = os.getenv("GROQ_STAGE2_MODEL", LLM_MODEL).strip() or LLM_MODEL
-    return ChatGroq(
-        model=model_name,
+    return build_bedrock_chat(
+        task_model_env="AWS_BEDROCK_STAGE2_MODEL_ID",
         temperature=0,
         timeout=LLM_TIMEOUT_SECONDS,
         max_retries=LLM_MAX_RETRIES,

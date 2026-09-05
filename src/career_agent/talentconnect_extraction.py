@@ -3,9 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-
+from career_agent.aws_llm import build_bedrock_chat
 from career_agent.batch_sources import SOURCE_DOCUMENT_SEPARATOR
 from career_agent.models.signal import ExtractedOpportunityBatch, OpportunitySignal
 
@@ -34,11 +32,8 @@ def _chunks(text: str) -> list[str]:
 
 
 def _build_llm():
-    load_dotenv()
-    if not os.getenv("GROQ_API_KEY"):
-        raise RuntimeError("GROQ_API_KEY is missing from .env")
-    return ChatGroq(
-        model="openai/gpt-oss-120b",
+    return build_bedrock_chat(
+        task_model_env="AWS_BEDROCK_EXTRACTION_MODEL_ID",
         temperature=0,
         timeout=20.0,
         max_retries=0,

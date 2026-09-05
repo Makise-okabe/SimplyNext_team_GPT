@@ -55,12 +55,12 @@ def test_short_retry_after_is_honoured_and_success_returned(monkeypatch):
 
 def test_client_has_no_hidden_retry_loop(monkeypatch):
     from career_agent import talentconnect_extraction as extraction
-    monkeypatch.setenv('GROQ_API_KEY', 'test')
     config = {}
     def client(**kwargs):
         config.update(kwargs)
         return SimpleNamespace(with_structured_output=lambda _: None)
-    monkeypatch.setattr(extraction, 'ChatGroq', client)
+    monkeypatch.setattr(extraction, 'build_bedrock_chat', client)
     extraction._build_llm()
     assert config['max_retries'] == 0
     assert config['timeout'] == 20
+    assert config['task_model_env'] == 'AWS_BEDROCK_EXTRACTION_MODEL_ID'

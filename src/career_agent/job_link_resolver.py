@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import quote_plus, urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, unquote
 
 from career_agent.job_research_quality import is_plausible_official_url, is_secondary_url
 from career_agent.models.job_record import JobRecord
@@ -183,10 +183,6 @@ def _query(company: str, title: str) -> str:
     return f'"{company}" "{clean_search_title(title)}" careers job'
 
 
-def _search_fallback_url(company: str, title: str) -> str:
-    return f"https://www.google.com/search?q={quote_plus(f'\"{company}\" \"{clean_search_title(title)}\" official careers job')}"
-
-
 def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
     """Discover candidates, then verify fetched identity before publishing any URL.
 
@@ -221,10 +217,11 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         if best_candidate is None or candidate[0] > best_candidate[0]:
             best_candidate = candidate
 
-    def fallback_fields() -> dict:
+    def unresolved_fields() -> dict:
         update = {
-            "search_fallback_url": _search_fallback_url(company, title),
-            "search_resolution_status": "search_fallback_only",
+            # Never publish a search-results page as the student's next step.
+            "search_fallback_url": None,
+            "search_resolution_status": "unresolved",
             "company_careers_url": best_careers_url,
             "candidate_job_url": None,
             "candidate_job_kind": None,
@@ -288,7 +285,7 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
     def finish(found):
         update = {"link_attempts": attempts}
         if found.link_verification_status != "verified":
-            update.update(fallback_fields())
+            update.update(unresolved_fields())
         found = found.model_copy(update=update)
         return found, LinkResolution(found.job_page_url, found.job_page_kind, found.job_page_confidence, query_used, len(attempts))
 
@@ -348,7 +345,7 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         return finish(best_secondary)
     from datetime import datetime, timezone
     unresolved = base.model_copy(update={
-        **fallback_fields(),
+        **unresolved_fields(),
         "link_verification_status": "unresolved",
         "link_verification_reason": "No destination passed company, role and availability checks",
         "link_checked_at": datetime.now(timezone.utc).isoformat(),

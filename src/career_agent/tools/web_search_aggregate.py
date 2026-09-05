@@ -83,22 +83,23 @@ def search_public_web_aggregated(
     seen: set[str] = set()
     provider_cap = max(1, min(PROVIDER_RESULT_CAP, max_results))
 
-    # Tavily is useful when configured, but it only gets a bounded share of the
-    # candidate pool so public providers can still contribute different results.
-    for variant in variants:
-        try:
-            raw = web_search._search_tavily(variant, provider_cap)
-        except Exception:
-            raw = []
-        _merge_results(
-            collected,
-            seen,
-            raw,
-            original_query=query,
-            constraint=constraint,
-            strict_relevance=strict_relevance,
-            provider_cap=provider_cap,
-        )
+    # AWS AgentCore is the stable search provider. Keep its share bounded so
+    # independent public providers can still contribute a missed official page.
+    if web_search._agentcore_gateway_url():
+        for variant in variants:
+            try:
+                raw = web_search._search_aws_agentcore(variant, provider_cap)
+            except Exception:
+                raw = []
+            _merge_results(
+                collected,
+                seen,
+                raw,
+                original_query=query,
+                constraint=constraint,
+                strict_relevance=strict_relevance,
+                provider_cap=provider_cap,
+            )
 
     primary_providers = (
         (web_search.BING_URL, web_search._parse_bing_results),
@@ -126,7 +127,7 @@ def search_public_web_aggregated(
                 provider_cap=provider_cap,
             )
 
-    # Do not let a full candidate pool from Tavily/Bing prevent DuckDuckGo from
+    # Do not let a full candidate pool from AgentCore/Bing prevent DuckDuckGo from
     # contributing when broad recall is requested. In strict mode, however, the
     # older cost-saving behavior is preserved once enough relevant results exist.
     should_try_fallbacks = not strict_relevance or len(collected) < min_results

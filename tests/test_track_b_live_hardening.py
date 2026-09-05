@@ -114,9 +114,9 @@ def test_generic_talentconnect_lead_is_not_a_concrete_job() -> None:
 def test_search_provider_failure_falls_through_to_bing_rss_then_next_provider(monkeypatch) -> None:
     calls: list[str] = []
 
-    # This test targets public-provider failover only. A real Tavily key in the
-    # developer's .env must not short-circuit the mocked Bing/DDG path.
-    monkeypatch.setattr(web_search, "_search_tavily", lambda *args, **kwargs: [])
+    # This test targets public-provider failover only. A configured AgentCore
+    # gateway in the developer's .env must not short-circuit the mocked path.
+    monkeypatch.setattr(web_search, "_agentcore_gateway_url", lambda: "")
 
     def fake_request(url, query, *, parser, max_results, headers):
         calls.append(url)

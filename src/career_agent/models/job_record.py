@@ -34,6 +34,8 @@ JobPageKind = Literal[
 JobPageConfidence = Literal["high", "medium", "low"]
 SearchResolutionStatus = Literal[
     "resolved_job_page",
+    "unresolved",
+    # Accepted for old saved results; new runs no longer create search links.
     "search_fallback_only",
     "not_searched",
 ]
@@ -49,9 +51,9 @@ class SourceDocument(BaseModel):
 class JobRecord(BaseModel):
     """Canonical job contract consumed by the career-opportunity agent.
 
-    A concrete job page, a search fallback, and JD evidence are intentionally
-    separate. The UI can therefore remain useful even when a search provider
-    cannot resolve a direct posting or a dynamic page cannot be scraped.
+    A concrete job page and JD evidence are intentionally separate. The UI can
+    therefore preserve the email opportunity when search cannot resolve a
+    direct posting or a dynamic page cannot be scraped.
     """
 
     source_key: Literal[
@@ -109,8 +111,8 @@ class JobRecord(BaseModel):
     qualifications: list[str] = Field(default_factory=list)
     source_provenance: list[dict] = Field(default_factory=list)
 
-    # Search fallback is explicitly NOT treated as a resolved job page. It lets
-    # the UI offer "Find job" rather than showing a dead <unresolved> state.
+    # Retained only to read old result files. New runs never emit Google/search
+    # result URLs as a job page or call-to-action.
     search_fallback_url: str | None = None
     search_resolution_status: SearchResolutionStatus = "not_searched"
 

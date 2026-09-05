@@ -31,7 +31,7 @@ Definition of done:
 - known career sources and subject patterns are identified without an LLM
 
 ## M3 — Opportunity signal extraction
-Status: implemented; real LLM smoke test requires local GROQ_API_KEY.
+Status: implemented; real LLM smoke test requires an authenticated AWS profile with Bedrock access.
 
 Definition of done:
 - email -> structured company/role/type/deadline/location/source/links
@@ -62,7 +62,7 @@ Definition of done:
 - TalentConnect/login-wall-only evidence is never treated as fully verified
 
 ## M7 — LangGraph end-to-end
-Status: implemented; final real-data smoke run requires local GROQ_API_KEY.
+Status: implemented; final real-data smoke run requires an authenticated AWS profile with Bedrock access.
 
 Definition of done:
 - one real NUS career email runs through:

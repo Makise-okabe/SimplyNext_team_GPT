@@ -7,9 +7,7 @@ import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-
+from career_agent.aws_llm import build_bedrock_chat
 from career_agent.models.email import EmailMessage
 from career_agent.models.job_identity import (
     ExtractedJobIdentity,
@@ -273,12 +271,8 @@ def _fingerprint(
 
 
 def _build_llm():
-    load_dotenv()
-    if not os.getenv("GROQ_API_KEY"):
-        raise RuntimeError("GROQ_API_KEY is missing from .env")
-
-    return ChatGroq(
-        model="openai/gpt-oss-120b",
+    return build_bedrock_chat(
+        task_model_env="AWS_BEDROCK_EXTRACTION_MODEL_ID",
         temperature=0,
     ).with_structured_output(ExtractedJobIdentityBatch)
 

@@ -10,7 +10,7 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
-from career_agent.all_job_extraction import extract_all_opportunities
+from career_agent.all_job_extraction import ExtractionMetrics, extract_all_opportunities
 from career_agent.batch_sources import build_source_corpus
 from career_agent.catalog_consolidation import consolidate_job_records
 from career_agent.connectors.outlook_graph import CAREER_SOURCE_BY_SENDER, OutlookGraphConnector
@@ -91,6 +91,12 @@ def _fresh_goh_base_extractor(**kwargs):
     return extract_all_opportunities(**kwargs)
 
 
+def _no_llm_goh_base_extractor(**kwargs):
+    """No-op base so the frozen Goh extractor returns deterministic table rows only."""
+    corpus = str(kwargs.get("corpus") or "")
+    return [], ExtractionMetrics(llm_calls=0, source_chars=len(corpus)), []
+
+
 def _extract_email(source: str, email):
     corpus, _source_links, _documents, warnings = build_source_corpus(
         email,
@@ -103,12 +109,26 @@ def _extract_email(source: str, email):
         "corpus": corpus,
     }
     if source == "goh_ze_li":
-        # Frozen Goh logic: structured tables are deterministic. LLM is only used
-        # for meaningful non-table residue, not once per company/role.
+        # First pass: force the frozen structured-table parser to stand on its own.
+        # A normal Goh circular contains many deterministic JOBS/INTERNSHIPS rows;
+        # those rows should not consume LLM quota merely because linked PDFs or
+        # introductory prose also contain words such as "job" or "engineer".
         signals, metrics, errors = extract_goh_opportunities(
             **kwargs,
-            base_extractor=_fresh_goh_base_extractor,
+            base_extractor=_no_llm_goh_base_extractor,
         )
+
+        # If the email is not one of the normal structured circulars, preserve the
+        # frozen fallback behavior rather than silently dropping unstructured jobs.
+        if len(signals) < 10:
+            fallback_signals, fallback_metrics, fallback_errors = extract_goh_opportunities(
+                **kwargs,
+                base_extractor=_fresh_goh_base_extractor,
+            )
+            if len(fallback_signals) > len(signals):
+                signals = fallback_signals
+                metrics = fallback_metrics
+            errors = [*errors, *fallback_errors]
     else:
         signals, metrics, errors = extract_talentconnect_opportunities(**kwargs)
     return signals, metrics, [*warnings, *errors]

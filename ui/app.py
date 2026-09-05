@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from career_agent.student_profile import build_student_profile
+from ui.link_rescue import rescue_result_links
 from ui.live_pipeline import build_live_matching_candidates
 
 RUNNER = PROJECT_ROOT / "scripts/run_career_opportunity_agent.py"
@@ -128,7 +129,6 @@ def _run_backend(
     progress = st.progress(0, text="Ranking live Outlook opportunities...")
     live_line = st.empty()
     child_env = dict(os.environ)
-    # UI-only process encoding guard. The frozen runner itself remains untouched.
     child_env["PYTHONIOENCODING"] = "utf-8"
     child_env["PYTHONUTF8"] = "1"
 
@@ -179,13 +179,6 @@ def _run_backend(
 
 
 def _attach_source_metadata(result: dict, source_index: dict[tuple[str, str], dict]) -> dict:
-    """Restore source/link fields already present in the live backend candidates.
-
-    The frozen runner intentionally emits a compact final-card contract and does
-    not repeat every primary/secondary source field. The UI joins those existing
-    backend fields back by company/title for display only. No score, ordering,
-    evidence, search, or URL is created here.
-    """
     payload = dict(result)
     enriched_cards = []
     source_fields = (
@@ -304,6 +297,10 @@ def _render_landing() -> None:
                         output_path,
                     )
                     result = _attach_source_metadata(result, live_build.source_index)
+
+                    status.write("Validating displayed job links against the live destination pages...")
+                    result, link_logs = rescue_result_links(result, progress=status.write)
+
                     result["live_inbox"] = {
                         "email_count": live_build.email_count,
                         "email_source_counts": live_build.email_source_counts,
@@ -316,7 +313,7 @@ def _render_landing() -> None:
 
                 st.session_state.sn_result = result
                 st.session_state.sn_profile = profile
-                st.session_state.sn_logs = [*inbox_lines, *backend_logs]
+                st.session_state.sn_logs = [*inbox_lines, *backend_logs, *link_logs]
                 st.session_state.sn_live_build = result["live_inbox"]
                 st.session_state.sn_resume_name = resume.name
                 st.session_state.sn_transcript_name = transcript.name
@@ -373,7 +370,6 @@ def _render_profile(profile: dict | None, result: dict) -> None:
 
 
 def _unique_links(card: dict) -> list[tuple[str, str]]:
-    """Return only direct backend-resolved job/source links; never search fallbacks."""
     job_page_url = str(card.get("job_page_url") or "").strip()
     kind = str(card.get("job_page_kind") or "").lower()
 
@@ -422,7 +418,7 @@ def _render_job_cta(card: dict) -> None:
             )
         return
 
-    st.markdown("<div class='sn-unavailable'>No direct job page resolved</div>", unsafe_allow_html=True)
+    st.markdown("<div class='sn-unavailable'>No verified direct job page found</div>", unsafe_allow_html=True)
 
 
 def _evidence_label(card: dict) -> str:
@@ -567,7 +563,7 @@ def _render_dashboard(result: dict, profile: dict | None) -> None:
     logs = st.session_state.get("sn_logs") or []
     if logs:
         with st.expander("Demo diagnostics"):
-            st.code("\n".join(logs[-80:]), language="text")
+            st.code("\n".join(logs[-120:]), language="text")
 
 
 _load_css()

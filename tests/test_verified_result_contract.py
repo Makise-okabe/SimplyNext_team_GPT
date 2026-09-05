@@ -37,6 +37,9 @@ def test_structured_jd_survives_script_removal_and_export():
     assert card['application_url'] == URL
     assert card['jd_source_url'] == URL
     assert 'Python' in card['jd_text']
+    links = actionable_job_links(card)
+    assert links[0] == ("Open official job ↗", URL)
+    assert links[1][0] == "Search LinkedIn ↗"
 
 
 @pytest.mark.parametrize('changes,status', [
@@ -78,7 +81,7 @@ def test_likely_official_candidate_is_shown_before_search_fallback():
         candidate_job_reason="Search result matches company and title",
     ).model_dump(), {})
     links = actionable_job_links(card)
-    assert links[0] == ("Check likely official page ↗", candidate)
+    assert links[0] == ("Check possible role page ↗", candidate)
     assert verified_job_url(card) is None
 
 

@@ -259,6 +259,12 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         if verification.status == "verified":
             resolved = apply_page_verification(base, verification)
             if verification.kind == "official_exact":
+                # Keep an already verified LinkedIn/secondary match as the
+                # second choice, while the exact employer page stays primary.
+                if best_secondary and best_secondary.job_page_url != resolved.job_page_url:
+                    resolved = resolved.model_copy(update={
+                        "secondary_source_url": best_secondary.job_page_url,
+                    })
                 return resolved
             best_secondary = best_secondary or resolved
         elif verification.status == "closed" and verification.details.get("official"):

@@ -20,22 +20,41 @@ def verified_job_url(card: dict) -> str | None:
 
 
 def actionable_job_links(card: dict) -> list[tuple[str, str]]:
-    """Return safe clickable next steps ordered from strongest to broadest."""
+    """Return exact employer page first, then LinkedIn/secondary discovery."""
+    links: list[tuple[str, str]] = []
     verified = verified_job_url(card)
     if verified:
         label = "Open official job ↗" if card.get("job_page_kind") == "official_exact" else "Open secondary listing ↗"
-        return [(label, verified)]
+        if "linkedin.com" in verified.lower():
+            label = "Open LinkedIn job ↗"
+        links.append((label, verified))
 
-    links: list[tuple[str, str]] = []
-    candidate = str(card.get("candidate_job_url") or "")
-    if public_http_url(candidate):
-        label = "Check likely official page ↗" if card.get("candidate_job_kind") == "official_candidate" else "Check secondary listing ↗"
-        links.append((label, candidate))
+        # A companion secondary URL is displayed only if this run separately
+        # fetched and verified it. Ranking output cannot invent this evidence.
+        secondary = str(card.get("secondary_source_url") or "")
+        verified_attempt_urls = {
+            str(attempt.get("final_url") or attempt.get("url") or "")
+            for attempt in (card.get("link_attempts") or [])
+            if attempt.get("status") == "verified"
+        }
+        if (card.get("job_page_kind") == "official_exact"
+            and public_http_url(secondary)
+            and secondary in verified_attempt_urls
+            and secondary != verified):
+            secondary_label = "Open LinkedIn job ↗" if "linkedin.com" in secondary.lower() else "Open secondary listing ↗"
+            links.append((secondary_label, secondary))
+
+    if not verified:
+        candidate = str(card.get("candidate_job_url") or "")
+        if public_http_url(candidate):
+            label = "Check possible role page ↗" if card.get("candidate_job_kind") == "official_candidate" else "Check secondary listing ↗"
+            links.append((label, candidate))
 
     company = str(card.get("company") or "").strip()
     title = clean_search_title(str(card.get("title") or "").strip())
     location = str(card.get("location") or "Singapore").strip()
-    if company and title:
+    has_linkedin = any("linkedin.com" in url.lower() for _, url in links)
+    if company and title and not has_linkedin:
         linkedin_url = "https://www.linkedin.com/jobs/search/?" + f"keywords={quote_plus(company + ' ' + title)}&location={quote_plus(location)}"
         links.append(("Search LinkedIn ↗", linkedin_url))
 

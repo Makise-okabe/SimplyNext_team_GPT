@@ -25,6 +25,12 @@ def test_official_found_after_linkedin(monkeypatch):
     resolved, _ = resolver.resolve_job_link(job())
     assert resolved.job_page_url == official
     assert resolved.job_page_kind == "official_exact"
+    assert resolved.secondary_source_url == "https://www.linkedin.com/jobs/view/456"
+    links = actionable_job_links(job_card(resolved.model_dump(), {}))
+    assert links == [
+        ("Open official job ↗", official),
+        ("Open LinkedIn job ↗", "https://www.linkedin.com/jobs/view/456"),
+    ]
     assert len(calls) == 2
 
 

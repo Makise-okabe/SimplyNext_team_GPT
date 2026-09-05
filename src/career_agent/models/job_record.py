@@ -100,6 +100,9 @@ class JobRecord(BaseModel):
     link_verification_reason: str = ""
     link_attempts: list[dict] = Field(default_factory=list)
     company_careers_url: str | None = None
+    candidate_job_url: str | None = None
+    candidate_job_kind: Literal["official_candidate", "secondary_candidate"] | None = None
+    candidate_job_reason: str = ""
     responsibilities: list[str] = Field(default_factory=list)
     required_skills: list[str] = Field(default_factory=list)
     preferred_skills: list[str] = Field(default_factory=list)

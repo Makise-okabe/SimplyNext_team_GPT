@@ -52,6 +52,31 @@ def test_resolver_keeps_true_exact_secondary_page(monkeypatch):
     assert calls[0][0] == '"Reolink" "AI Engineer" careers job'
 
 
+def test_resolver_retains_matching_candidate_when_page_blocks_automation(monkeypatch):
+    url = "https://reolink.com/careers/jobs/ai-engineer"
+    monkeypatch.setattr(
+        job_link_resolver,
+        "search_public_web",
+        lambda query, **kwargs: [SearchResult(
+            title="AI Engineer - Reolink Careers",
+            url=url,
+            snippet="Official Reolink careers page",
+        )],
+    )
+    monkeypatch.setattr(
+        job_link_resolver,
+        "fetch_public_page",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("access challenge")),
+    )
+
+    resolved, result = resolve_job_link(_job())
+
+    assert result.url is None
+    assert resolved.candidate_job_url == url
+    assert resolved.candidate_job_kind == "official_candidate"
+    assert resolved.search_fallback_url.startswith("https://www.google.com/search?")
+
+
 def test_resolver_prefers_official_exact(monkeypatch):
     monkeypatch.setattr(
         job_link_resolver,

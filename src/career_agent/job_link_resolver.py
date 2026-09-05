@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import quote_plus, urlparse, parse_qs, unquote
 
-from career_agent.job_research_quality import is_plausible_official_url
+from career_agent.job_research_quality import is_plausible_official_url, is_secondary_url
 from career_agent.models.job_record import JobRecord
 from career_agent.tools.web_search import SearchResult, search_public_web
 from career_agent.tools.web_fetch import fetch_public_page, public_http_url
@@ -184,7 +184,7 @@ def _query(company: str, title: str) -> str:
 
 
 def _search_fallback_url(company: str, title: str) -> str:
-    return f"https://www.google.com/search?q={quote_plus(company + ' ' + title + ' jobs')}"
+    return f"https://www.google.com/search?q={quote_plus(f'\"{company}\" \"{clean_search_title(title)}\" official careers job')}"
 
 
 def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
@@ -200,11 +200,43 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         return base, LinkResolution(None, "unresolved", "low", None, 0)
     attempts, tried, fetched = [], set(), 0
     best_secondary = None
+    best_candidate: tuple[float, str, str, str] | None = None
+    best_careers_url = job.company_careers_url
     closed = None
     query_used = None
 
+    def remember_candidate(url: str, *, score: float, reason: str) -> None:
+        nonlocal best_candidate
+        if not public_http_url(url):
+            return
+        if is_plausible_official_url(url, company):
+            kind = "official_candidate"
+            score += 100.0
+        elif is_secondary_url(url):
+            kind = "secondary_candidate"
+        else:
+            return
+        candidate = (score, url, kind, reason)
+        if best_candidate is None or candidate[0] > best_candidate[0]:
+            best_candidate = candidate
+
+    def fallback_fields() -> dict:
+        update = {
+            "search_fallback_url": _search_fallback_url(company, title),
+            "search_resolution_status": "search_fallback_only",
+            "company_careers_url": best_careers_url,
+        }
+        if best_candidate:
+            _, url, kind, reason = best_candidate
+            update.update(
+                candidate_job_url=url,
+                candidate_job_kind=kind,
+                candidate_job_reason=reason,
+            )
+        return update
+
     def check(url, query):
-        nonlocal fetched, closed, best_secondary
+        nonlocal fetched, closed, best_secondary, best_careers_url
         if not public_http_url(url) or url in tried or fetched >= 6:
             return None
         tried.add(url)
@@ -225,6 +257,7 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
             closed = apply_page_verification(base, verification)
         # Official career pages are discovery seeds, never application buttons.
         if verification.status == "generic_page" and is_plausible_official_url(page.final_url, company):
+            best_careers_url = best_careers_url or page.final_url
             links = [link for link in page.links if _looks_job_like(link) and is_plausible_official_url(link, company)]
             links.sort(key=lambda link: _resolver_title_overlap(title, unquote(link)), reverse=True)
             for link in links[:2]:
@@ -236,7 +269,10 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         return None
 
     def finish(found):
-        found = found.model_copy(update={"link_attempts": attempts})
+        update = {"link_attempts": attempts}
+        if found.link_verification_status != "verified":
+            update.update(fallback_fields())
+        found = found.model_copy(update=update)
         return found, LinkResolution(found.job_page_url, found.job_page_kind, found.job_page_confidence, query_used, len(attempts))
 
     existing = list(dict.fromkeys(filter(None, [job.job_page_url, job.official_job_url, job.primary_source_url, job.application_url, *job.source_urls, job.secondary_source_url])))
@@ -244,6 +280,10 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
     for url in existing[:3]:
         if not (_looks_job_like(url) or is_plausible_official_url(url, company)):
             continue
+        if _looks_job_like(url):
+            remember_candidate(url, score=80.0, reason="Job-specific link supplied by the career email")
+        elif is_plausible_official_url(url, company):
+            best_careers_url = best_careers_url or url
         found = check(url, "email_or_existing_link")
         if found:
             return finish(found)
@@ -268,6 +308,14 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
             # Fetched content is still mandatory and authoritative.
             if score or (is_plausible_official_url(result.url, company) and _looks_job_like(result.url)):
                 scored.append(((score[0] if score else 0), result))
+                if score and _looks_job_like(result.url):
+                    remember_candidate(
+                        result.url,
+                        score=(score[0] if score else 0),
+                        reason="Search result matched the employer and role title but the page could not be fully verified",
+                    )
+                elif score and score[1] == "company_careers":
+                    best_careers_url = best_careers_url or result.url
         scored.sort(key=lambda item: (not is_plausible_official_url(item[1].url, company), -item[0]))
         for _, result in scored:
             found = check(result.url, query_used)
@@ -281,8 +329,7 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         return finish(best_secondary)
     from datetime import datetime, timezone
     unresolved = base.model_copy(update={
-        "search_fallback_url": _search_fallback_url(company, title),
-        "search_resolution_status": "search_fallback_only",
+        **fallback_fields(),
         "link_verification_status": "unresolved",
         "link_verification_reason": "No destination passed company, role and availability checks",
         "link_checked_at": datetime.now(timezone.utc).isoformat(),

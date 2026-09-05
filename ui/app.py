@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from career_agent.student_profile import build_student_profile
-from career_agent.presentation import verified_job_url
+from career_agent.presentation import actionable_job_links, verified_job_url
 from ui.live_pipeline import build_live_matching_candidates
 
 RUNNER = PROJECT_ROOT / "scripts/run_career_opportunity_agent.py"
@@ -353,10 +353,7 @@ def _render_profile(profile: dict | None, result: dict) -> None:
 
 
 def _unique_links(card: dict) -> list[tuple[str, str]]:
-    url = verified_job_url(card)
-    if not url:
-        return []
-    return [("View official job ↗" if card.get("job_page_kind") == "official_exact" else "View secondary listing ↗", url)]
+    return actionable_job_links(card)
 
 
 def _render_job_cta(card: dict) -> None:
@@ -371,12 +368,11 @@ def _render_job_cta(card: dict) -> None:
             )
         from urllib.parse import urlparse
         st.caption(urlparse(links[0][1]).hostname or "")
+        if not verified_job_url(card):
+            st.caption("Candidate/search link · open it to confirm the current posting")
         return
 
-    status = card.get("link_verification_status") or "not_checked"
-    label = "Job page not checked yet" if status == "not_checked" else "Exact job page not verified"
-    st.markdown(f"<div class='sn-unavailable'>{label}</div>", unsafe_allow_html=True)
-    st.caption("The email opportunity is kept. A direct link appears only after its destination is checked.")
+    st.markdown("<div class='sn-unavailable'>No searchable company or role name</div>", unsafe_allow_html=True)
 
 
 def _evidence_label(card: dict) -> str:
@@ -492,6 +488,7 @@ def _render_dashboard(result: dict, profile: dict | None) -> None:
                 st.write(warning)
     top_matches = list(result.get("top_matches") or [])
     related = list(result.get("related_jobs") or [])
+    all_rankings = list(result.get("all_rankings") or [])
 
     st.markdown(
         """<section class="sn-dashboard-hero">
@@ -503,8 +500,15 @@ def _render_dashboard(result: dict, profile: dict | None) -> None:
     metric_cols = st.columns(4)
     metric_cols[0].metric("Opportunities retained", int(live.get("candidate_count") or metrics.get("active_jobs") or 0))
     metric_cols[1].metric("Roles investigated", int(metrics.get("web_selected") or 0))
-    metric_cols[2].metric("Verified job pages", int(metrics.get("links_resolved") or 0))
-    metric_cols[3].metric("Full descriptions", int(metrics.get("full_jd") or 0))
+    metric_cols[2].metric("Clickable next steps", sum(bool(actionable_job_links(card)) for card in all_rankings))
+    metric_cols[3].metric("Verified direct pages", int(metrics.get("links_resolved") or 0))
+    st.caption(f"Full job descriptions retrieved: {int(metrics.get('full_jd') or 0)}")
+    search_provider = (result.get("search") or {}).get("stable_api")
+    if int(metrics.get("web_selected") or 0) and not search_provider:
+        st.warning(
+            "A stable web-search API was not configured for this run, so automatic JD retrieval was limited. "
+            "Every card still includes clickable official-site and LinkedIn searches for manual checking."
+        )
     st.caption("Match scores compare fit; they are not a probability of receiving an offer.")
     for_you, all_jobs, your_profile = st.tabs(["For you", "All opportunities", "Your profile"])
     with for_you:
@@ -528,8 +532,8 @@ def _render_dashboard(result: dict, profile: dict | None) -> None:
         with type_col:
             employment = st.selectbox("Opportunity type", ["All types", "Full-time", "Internship"])
         with link_col:
-            verified_only = st.checkbox("Verified job pages only")
-        pool = list(result.get("all_rankings") or [])
+            verified_only = st.checkbox("Verified direct pages only")
+        pool = all_rankings
         filtered = [card for card in pool if (not query or query.casefold() in " ".join(str(card.get(k) or "") for k in ("company", "title", "location")).casefold())
                     and (employment == "All types" or card.get("opportunity_type") == {"Full-time": "full_time", "Internship": "internship"}[employment])
                     and (not verified_only or verified_job_url(card))]

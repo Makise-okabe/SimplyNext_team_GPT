@@ -5,7 +5,7 @@ import pytest
 from career_agent.catalog_consolidation import consolidate_job_records
 from career_agent.job_page_verifier import apply_page_verification, verify_job_page
 from career_agent.models.job_record import JobRecord
-from career_agent.presentation import job_card, verified_job_url
+from career_agent.presentation import actionable_job_links, job_card, verified_job_url
 from career_agent.research_session import research_session
 from career_agent.stage1_ranking import rank_jobs
 from career_agent.stage2_ranking import _find_source_job
@@ -60,6 +60,27 @@ def test_old_alias_cannot_restore_unverified_button():
     card = job_card(job(application_url=URL).model_dump(), {'job_page_url': URL, 'link_verification_status': 'verified'})
     assert verified_job_url(card) is None
     assert card['application_url'] is None
+
+
+def test_every_named_opportunity_has_clickable_search_fallbacks():
+    card = job_card(job().model_dump(), {})
+    links = actionable_job_links(card)
+    assert links[0][0] == "Search official job ↗"
+    assert links[0][1].startswith("https://www.google.com/search?")
+    assert links[1][0] == "Search LinkedIn ↗"
+    assert links[1][1].startswith("https://www.linkedin.com/jobs/search/?")
+
+
+def test_likely_official_candidate_is_shown_before_search_fallback():
+    candidate = "https://careers.amd.com/jobs/98765"
+    card = job_card(job(
+        candidate_job_url=candidate,
+        candidate_job_kind="official_candidate",
+        candidate_job_reason="Search result matches company and title",
+    ).model_dump(), {})
+    links = actionable_job_links(card)
+    assert links[0] == ("Check likely official page ↗", candidate)
+    assert verified_job_url(card) is None
 
 
 def test_ranking_cannot_reopen_closed_posting():

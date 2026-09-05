@@ -24,7 +24,7 @@ from career_agent.matching_dataset import (
     sanitize_job_sources,
 )
 from career_agent.models.job_record import JobRecord
-from career_agent.talentconnect_extraction import extract_talentconnect_opportunities
+from ui.talentconnect_cached import extract_talentconnect_cached
 
 ProgressCallback = Callable[[str], None]
 
@@ -109,17 +109,11 @@ def _extract_email(source: str, email):
         "corpus": corpus,
     }
     if source == "goh_ze_li":
-        # First pass: force the frozen structured-table parser to stand on its own.
-        # A normal Goh circular contains many deterministic JOBS/INTERNSHIPS rows;
-        # those rows should not consume LLM quota merely because linked PDFs or
-        # introductory prose also contain words such as "job" or "engineer".
+        # Structured Goh circulars are deterministic and should not consume LLM quota.
         signals, metrics, errors = extract_goh_opportunities(
             **kwargs,
             base_extractor=_no_llm_goh_base_extractor,
         )
-
-        # If the email is not one of the normal structured circulars, preserve the
-        # frozen fallback behavior rather than silently dropping unstructured jobs.
         if len(signals) < 10:
             fallback_signals, fallback_metrics, fallback_errors = extract_goh_opportunities(
                 **kwargs,
@@ -130,7 +124,9 @@ def _extract_email(source: str, email):
                 metrics = fallback_metrics
             errors = [*errors, *fallback_errors]
     else:
-        signals, metrics, errors = extract_talentconnect_opportunities(**kwargs)
+        # Same TalentConnect extraction semantics, but successful chunks are memoized
+        # by exact content hash and rate-limited chunks are paced/retried.
+        signals, metrics, errors = extract_talentconnect_cached(**kwargs)
     return signals, metrics, [*warnings, *errors]
 
 
@@ -138,9 +134,6 @@ def _signal_to_source_job(source: str, email, signal) -> JobRecord:
     expired = bool(signal.deadline_hint and signal.deadline_hint < date.today())
     source_urls = list(dict.fromkeys(signal.urls or []))
 
-    # Preserve links already present in the trusted source, but do not browse or
-    # fabricate anything here. The frozen Opportunity Agent will resolve/enrich
-    # only the rough-ranked shortlist later.
     primary = next(
         (url for url in source_urls if is_plausible_official_url(url, signal.company)),
         None,
@@ -183,14 +176,7 @@ def build_live_matching_candidates(
     *,
     progress: ProgressCallback | None = None,
 ) -> LiveInboxBuild:
-    """Scan all trusted Outlook mail, extract broadly, then let the frozen ranker enrich selectively.
-
-    This UI adapter intentionally performs NO company-by-company web research.
-    It invokes the existing frozen extractors, consolidator and matching contract,
-    then writes an ephemeral ``--jobs`` input for ``run_career_opportunity_agent.py``.
-    That frozen runner still performs: rough rank all -> web enrich top shortlist ->
-    semantic review top 5 -> related-role discovery.
-    """
+    """Scan all trusted Outlook mail, extract broadly, then let the frozen ranker enrich selectively."""
     scan_limit = max(1, int(os.getenv("SIMPLYNEXT_UI_EMAIL_SCAN", "999")))
     connector = OutlookGraphConnector()
 
@@ -229,7 +215,7 @@ def build_live_matching_candidates(
                 f"[EMAIL {email_index:02}/{len(unique_messages):02}] {source} — extracting opportunities"
             )
 
-        signals, metrics, warnings = _extract_email(source, email)
+        signals, metrics, messages = _extract_email(source, email)
         extraction_llm_calls += int(metrics.llm_calls)
 
         kept = 0
@@ -243,10 +229,14 @@ def build_live_matching_candidates(
 
         if progress:
             progress(
-                f"    -> {kept} concrete opportunity signal(s); extraction LLM calls={metrics.llm_calls}"
+                f"    -> {kept} concrete opportunity signal(s); actual LLM attempts={metrics.llm_calls}"
             )
-            for warning in warnings[:2]:
-                progress(f"       warning: {' '.join(str(warning).split())[:180]}")
+            for message in messages[:3]:
+                normalized = " ".join(str(message).split())[:220]
+                if normalized.startswith("INFO "):
+                    progress(f"       {normalized}")
+                else:
+                    progress(f"       warning: {normalized}")
 
     canonical_jobs = consolidate_job_records(raw_jobs)
     candidates: list[dict] = []
@@ -272,8 +262,6 @@ def build_live_matching_candidates(
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     candidate_source_counts = Counter(str(item.get("source_key") or "unknown") for item in candidates)
-    # Plain lookup only. Exact-link search/verification happens once, after the
-    # backend has already selected the cards that the UI will actually display.
     source_index = {_key(item.get("company"), item.get("title")): item for item in candidates}
 
     if progress:
@@ -281,7 +269,7 @@ def build_live_matching_candidates(
             f"Broad inbox pass ready: {len(raw_jobs)} raw jobs → "
             f"{len(canonical_jobs)} canonical jobs → {len(candidates)} active candidates."
         )
-        progress(f"Total extraction LLM calls across all unique emails: {extraction_llm_calls}.")
+        progress(f"Total actual extraction LLM attempts this run: {extraction_llm_calls}.")
         progress("Next: frozen runner rough-ranks all candidates, then web-enriches only its Top 15 shortlist.")
 
     return LiveInboxBuild(

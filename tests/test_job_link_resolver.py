@@ -105,6 +105,24 @@ def test_resolver_navigates_homepage_to_careers_to_exact_role(monkeypatch):
     assert [attempt["status"] for attempt in resolved.link_attempts] == ["generic_page", "generic_page", "verified"]
 
 
+def test_resolver_search_keeps_broad_official_homepage(monkeypatch):
+    homepage = SearchResult(
+        "Home : BH Global Corporation Ltd",
+        "https://www.bhglobal.com.sg/",
+        "BH Global",
+    )
+    captured = {}
+
+    def aggregate(query, **kwargs):
+        captured.update(kwargs)
+        return [homepage]
+
+    monkeypatch.setattr(job_link_resolver, "search_public_web_aggregated", aggregate)
+    assert job_link_resolver.search_public_web('"BH Global Corporation Ltd" "Electrical Intern"') == [homepage]
+    assert captured["strict_relevance"] is False
+    assert captured["max_results"] >= 12
+
+
 def test_resolver_prefers_official_exact(monkeypatch):
     monkeypatch.setattr(
         job_link_resolver,

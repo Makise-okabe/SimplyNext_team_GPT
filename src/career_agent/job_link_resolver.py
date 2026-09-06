@@ -6,7 +6,8 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 from career_agent.job_research_quality import is_plausible_official_url, is_secondary_url
 from career_agent.models.job_record import JobRecord
-from career_agent.tools.web_search import SearchResult, search_public_web
+from career_agent.tools.web_search import SearchResult
+from career_agent.tools.web_search_aggregate import search_public_web_aggregated
 from career_agent.tools.web_fetch import fetch_public_page, public_http_url
 from career_agent.job_page_verifier import apply_page_verification, clear_unverified_links, clean_search_title, verify_job_page
 from career_agent.research_session import current_session
@@ -43,6 +44,21 @@ TITLE_TOKEN_CANONICAL = {
     "analyst": "analysis",
     "analysts": "analysis",
 }
+
+
+def search_public_web(query: str, max_results: int = 8) -> list[SearchResult]:
+    """Broad candidate retrieval; this module performs the strict scoring.
+
+    Keeping an official homepage here is intentional: it can lead through a
+    Join Us/careers page to the exact role. Search metadata never verifies the
+    final URL by itself.
+    """
+    return search_public_web_aggregated(
+        query,
+        max_results=max(12, max_results),
+        min_results=6,
+        strict_relevance=False,
+    )
 
 
 @dataclass(frozen=True)

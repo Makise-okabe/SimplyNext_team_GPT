@@ -11,9 +11,9 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from career_agent.job_link_resolver import _score_result
+from career_agent.job_link_resolver import resolve_job_link
 from career_agent.models.job_record import JobRecord
-from career_agent.tools.web_search_aggregate import search_public_web_aggregated
+from career_agent.research_session import research_session
 
 
 def main() -> None:
@@ -32,28 +32,20 @@ def main() -> None:
         availability_status="active_candidate",
         record_kind="job_posting",
     )
-    query = f'"{args.company}" "{args.title}" careers job Singapore'
-    rows = search_public_web_aggregated(
-        query,
-        max_results=16,
-        min_results=8,
-        strict_relevance=False,
-    )
-    ranked = []
-    for row in rows:
-        score = _score_result(job, row)
-        if score:
-            ranked.append((score[0], score[1], row))
-    ranked.sort(key=lambda item: item[0], reverse=True)
+    with research_session() as session:
+        resolved, result = resolve_job_link(job)
 
     print("SIMPLYNEXT COMPLETE JOB SEARCH")
-    print(f"Query      : {query}")
-    print(f"Candidates : {len(rows)} raw / {len(ranked)} company-title matches")
-    if not ranked:
-        raise SystemExit("No usable company-title match found across all configured providers.")
-    for index, (score, kind, row) in enumerate(ranked[:8], start=1):
-        print(f"{index:02d}. {kind} score={score:.1f} | {row.title}")
-        print(f"    {row.url}")
+    print(f"Company    : {args.company}")
+    print(f"Role       : {args.title}")
+    print(f"Searches   : {session.search_calls}")
+    print(f"Pages read : {session.fetch_calls}")
+    for attempt in resolved.link_attempts:
+        print(f"  {attempt.get('status', 'unknown'):12} | {attempt.get('final_url') or attempt.get('url')}")
+    if not result.url:
+        raise SystemExit("No verified exact role page found across the complete search and site-navigation flow.")
+    print(f"Result     : {result.kind} / {result.confidence}")
+    print(f"URL        : {result.url}")
 
 
 if __name__ == "__main__":

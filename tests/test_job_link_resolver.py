@@ -78,6 +78,33 @@ def test_resolver_retains_matching_candidate_when_page_blocks_automation(monkeyp
     assert resolved.search_resolution_status == "unresolved"
 
 
+def test_resolver_navigates_homepage_to_careers_to_exact_role(monkeypatch):
+    home = "https://www.bhglobal.com.sg/"
+    careers = "https://www.bhglobal.com.sg/join-us/"
+    exact = "https://www.bhglobal.com.sg/jobs/electrical-intern/"
+    monkeypatch.setattr(
+        job_link_resolver,
+        "search_public_web",
+        lambda query, **kwargs: [SearchResult("Home : BH Global Corporation Ltd", home, "BH Global")],
+    )
+
+    def fetch(url, **kwargs):
+        if url == home:
+            return FetchedPage(url, url, 200, "BH Global", "BH Global", (careers,), (), (), "html", ((careers, "Join Us"),))
+        if url == careers:
+            return FetchedPage(url, url, 200, "Join Us", "BH Global careers", (exact,), (), (), "html", ((exact, "Electrical Intern"),))
+        assert url == exact
+        text = "Electrical Intern\nJob Scope\n" + "Assist with electrical systems and testing. " * 20 + "\nJob requirement\nElectrical engineering student."
+        return FetchedPage(url, url, 200, "Electrical Intern", text, (), ("Electrical Intern",))
+
+    monkeypatch.setattr(job_link_resolver, "fetch_public_page", fetch)
+    resolved, result = resolve_job_link(_job("BH Global Corporation Ltd", "Electrical Intern"))
+    assert result.url == exact
+    assert result.kind == "official_exact"
+    assert resolved.jd_status == "fetched_official"
+    assert [attempt["status"] for attempt in resolved.link_attempts] == ["generic_page", "generic_page", "verified"]
+
+
 def test_resolver_prefers_official_exact(monkeypatch):
     monkeypatch.setattr(
         job_link_resolver,

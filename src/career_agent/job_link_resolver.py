@@ -141,6 +141,17 @@ def _looks_job_like(url: str) -> bool:
     return bool(re.search(r"/(?:jobs?|careers?|positions?|openings?)/[^/]+|/(?:jobdetail|job-detail|requisition)/[^/]+", path))
 
 
+def _looks_career_seed(url: str) -> bool:
+    """Return true for employer pages that can lead to concrete job pages."""
+    if not public_http_url(url):
+        return False
+    path = unquote(urlparse(url).path).lower().rstrip("/")
+    return bool(re.search(
+        r"/(?:careers?|jobs?|join-us|join-our-team|work-with-us|vacancies|opportunities)(?:/|$)",
+        path,
+    ))
+
+
 def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str] | None:
     identity = f"{result.title} {result.url}"
     official = is_plausible_official_url(result.url, job.company)
@@ -296,15 +307,26 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         # Official career pages are discovery seeds, never application buttons.
         if verification.status == "generic_page" and is_plausible_official_url(page.final_url, company):
             best_careers_url = best_careers_url or page.final_url
-            links = [link for link in page.links if _looks_job_like(link) and is_plausible_official_url(link, company)]
+            links = [
+                link for link in page.links
+                if is_plausible_official_url(link, company)
+                and (_looks_job_like(link) or _looks_career_seed(link))
+            ]
             labels = dict(page.link_labels)
             def link_overlap(link):
                 return _resolver_title_overlap(title, labels.get(link, "") + " " + unquote(link))
-            links.sort(key=link_overlap, reverse=True)
-            for link in links[:2]:
-                if link_overlap(link) < .5:
+            def discovery_score(link):
+                score = link_overlap(link)
+                if _looks_job_like(link):
+                    score += 1.0
+                elif _looks_career_seed(link):
+                    score += .25
+                return score
+            links.sort(key=discovery_score, reverse=True)
+            for link in links[:3]:
+                if _looks_job_like(link) and link_overlap(link) < .5:
                     continue
-                found = check(link, "employer_page_link")
+                found = check(link, "employer_site_navigation")
                 if found:
                     return found
         return None

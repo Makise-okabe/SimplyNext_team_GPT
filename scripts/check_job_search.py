@@ -42,6 +42,8 @@ def main() -> None:
     print(f"Pages read : {session.fetch_calls}")
     for attempt in resolved.link_attempts:
         print(f"  {attempt.get('status', 'unknown'):12} | {attempt.get('final_url') or attempt.get('url')}")
+        if attempt.get("reason"):
+            print(f"                 reason: {attempt['reason']}")
     if not result.url:
         raise SystemExit("No verified exact role page found across the complete search and site-navigation flow.")
     print(f"Result     : {result.kind} / {result.confidence}")

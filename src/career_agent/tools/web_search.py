@@ -335,7 +335,9 @@ def search_groq_grounded(query: str, max_results: int = 8) -> list[SearchResult]
         },
         timeout=20.0,
     )
-    response.raise_for_status()
+    if response.is_error:
+        detail = " ".join(response.text.split())[:1000] or "<empty response>"
+        raise RuntimeError(f"Groq grounded search HTTP {response.status_code}: {detail}")
     payload = response.json()
     choices = payload.get("choices") or []
     message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}

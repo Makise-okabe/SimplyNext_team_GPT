@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import argparse
 import sys
 from pathlib import Path
 
@@ -16,6 +17,9 @@ from career_agent.aws_llm import aws_region, bedrock_model_id, build_bedrock_cha
 
 def main() -> None:
     load_dotenv()
+    parser = argparse.ArgumentParser(description="Make live Bedrock and AgentCore requests; do not use search cache.")
+    parser.add_argument("--query", default='"BH Global" "Electrical Intern"')
+    args = parser.parse_args()
     try:
         import boto3
     except ImportError as exc:
@@ -44,19 +48,21 @@ def main() -> None:
     except Exception as exc:
         raise SystemExit(f"Bedrock test failed: {exc}") from exc
     print(f"  Bedrock : {reply.content}")
+    print(f"  Usage   : {reply.response_metadata.get('usage', {})}")
 
     gateway_url = os.getenv("AWS_AGENTCORE_GATEWAY_URL", "").strip()
     if not gateway_url:
-        print("  Search  : not configured; run scripts/setup_aws_agentcore_search.py")
-        return
+        raise SystemExit("Search not configured; run scripts/setup_aws_agentcore_search.py")
 
     from career_agent.tools.web_search import _search_aws_agentcore
 
     try:
-        results = _search_aws_agentcore("Amazon software engineer careers", 2)
+        results = _search_aws_agentcore(args.query, 8, bypass_cache=True)
     except Exception as exc:
         raise SystemExit(f"AgentCore Web Search test failed: {exc}") from exc
-    print(f"  Search  : ready ({len(results)} result(s))")
+    if not results:
+        raise SystemExit("Search returned ZERO usable URLs. Search readiness has NOT been established.")
+    print(f"  Search  : live response ({len(results)} result(s)); verify company/title below")
     for result in results:
         print(f"            {result.title} | {result.url}")
 

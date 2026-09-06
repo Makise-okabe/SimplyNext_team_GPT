@@ -320,7 +320,7 @@ def _claim_agentcore_network_call() -> bool:
         return True
 
 
-def _search_aws_agentcore(query: str, max_results: int) -> list[SearchResult]:
+def _search_aws_agentcore(query: str, max_results: int, *, bypass_cache: bool = False) -> list[SearchResult]:
     """Call the AWS AgentCore managed Web Search connector through an IAM gateway."""
     gateway_url = _agentcore_gateway_url()
     if not gateway_url:
@@ -340,7 +340,7 @@ def _search_aws_agentcore(query: str, max_results: int) -> list[SearchResult]:
         or "simplenext-web-search___WebSearch"
     )
     cache_path = _agentcore_cache_file(gateway_url, tool_name, query, max_results)
-    cached = _cached_agentcore_results(cache_path)
+    cached = None if bypass_cache else _cached_agentcore_results(cache_path)
     if cached is not None:
         LOGGER.info("AgentCore search cache hit: %s", query)
         return cached[:max_results]
@@ -399,8 +399,23 @@ def _search_aws_agentcore(query: str, max_results: int) -> list[SearchResult]:
     if payload.get("error"):
         raise RuntimeError(f"AgentCore Web Search error: {payload['error']}")
 
+    results = _agentcore_search_results(payload, max_results)
+    LOGGER.warning("AgentCore search HTTP %s: %s URL result(s) for %s", response.status_code, len(results), query)
+    if results:
+        _save_agentcore_results(cache_path, results)
+    return results
+
+
+def _agentcore_search_results(payload: dict, max_results: int) -> list[SearchResult]:
+    if payload.get("error"):
+        raise RuntimeError(f"AgentCore Web Search error: {payload['error']}")
     result = payload.get("result") or {}
-    nested: dict = {}
+    if result.get("isError"):
+        detail = " ".join(str(block.get("text", "")) for block in result.get("content", []) if isinstance(block, dict))
+        raise RuntimeError(f"AgentCore tool failed: {detail[:1200]}")
+    nested = result.get("structuredContent") or {}
+    if not isinstance(nested, dict):
+        nested = {}
     for block in result.get("content") or []:
         if not isinstance(block, dict) or block.get("type") != "text":
             continue
@@ -408,10 +423,12 @@ def _search_aws_agentcore(query: str, max_results: int) -> list[SearchResult]:
             candidate = json.loads(block.get("text") or "{}")
         except json.JSONDecodeError:
             continue
-        if isinstance(candidate, dict):
+        if isinstance(candidate, dict) and "results" in candidate and "results" not in nested:
             nested = candidate
             break
 
+    if not isinstance(nested, dict) or not isinstance(nested.get("results"), list):
+        raise RuntimeError("AgentCore returned an unrecognized search response (missing results list)")
     results: list[SearchResult] = []
     seen: set[str] = set()
     for item in nested.get("results") or []:
@@ -422,12 +439,10 @@ def _search_aws_agentcore(query: str, max_results: int) -> list[SearchResult]:
             seen,
             title=str(item.get("title") or ""),
             href=str(item.get("url") or ""),
-            snippet=str(item.get("text") or ""),
+            snippet=str(item.get("text") or item.get("snippet") or ""),
         )
         if len(results) >= max_results:
             break
-    if results:
-        _save_agentcore_results(cache_path, results)
     return results
 
 
@@ -602,7 +617,7 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
             collected.append(item)
 
     if _agentcore_gateway_url():
-        for variant in variants:
+        for variant in variants[:1]:
             try:
                 aws_results = _filter_results(
                     _search_aws_agentcore(variant, max(1, min(4, max_results // 2))),

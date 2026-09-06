@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
 import re
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from pathlib import Path
+from threading import Lock
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
@@ -30,7 +34,12 @@ DUCKDUCKGO_LITE_URL = "https://lite.duckduckgo.com/lite/"
 SEARCH_TIMEOUT_SECONDS = 6.0
 AWS_SEARCH_TIMEOUT_SECONDS = 20.0
 AWS_AGENTCORE_MCP_VERSION = "2026-07-28"
+DEFAULT_AGENTCORE_MAX_CALLS = 15
+DEFAULT_AGENTCORE_CACHE_TTL_SECONDS = 12 * 60 * 60
 LOGGER = logging.getLogger(__name__)
+_AGENTCORE_BUDGET_LOCK = Lock()
+_AGENTCORE_NETWORK_CALLS = 0
+_AGENTCORE_BUDGET_WARNING_EMITTED = False
 SITE_PATTERN = re.compile(r"(?i)(?:^|\s)site:([^\s\"']+)")
 QUOTED_PATTERN = re.compile(r'"([^\"]+)"')
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
@@ -240,6 +249,71 @@ def _agentcore_json_response(response: httpx.Response) -> dict:
     raise ValueError("AgentCore Gateway returned no JSON-RPC payload")
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _agentcore_cache_file(
+    gateway_url: str,
+    tool_name: str,
+    query: str,
+    max_results: int,
+) -> Path:
+    root = Path(os.getenv("SIMPLYNEXT_AGENTCORE_CACHE_DIR", ".cache/agentcore_search_v1"))
+    key = json.dumps(
+        [gateway_url, tool_name, query, max_results],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return root / f"{hashlib.sha256(key.encode('utf-8')).hexdigest()}.json"
+
+
+def _cached_agentcore_results(path: Path) -> list[SearchResult] | None:
+    ttl = _positive_int_env(
+        "SIMPLYNEXT_AGENTCORE_CACHE_TTL_SECONDS",
+        DEFAULT_AGENTCORE_CACHE_TTL_SECONDS,
+    )
+    if ttl <= 0 or not path.exists() or time.time() - path.stat().st_mtime > ttl:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return [SearchResult(**item) for item in payload.get("results", [])]
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _save_agentcore_results(path: Path, results: list[SearchResult]) -> None:
+    if _positive_int_env("SIMPLYNEXT_AGENTCORE_CACHE_TTL_SECONDS", DEFAULT_AGENTCORE_CACHE_TTL_SECONDS) <= 0:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"results": [item.__dict__ for item in results]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        LOGGER.debug("Could not write AgentCore search cache", exc_info=True)
+
+
+def _claim_agentcore_network_call() -> bool:
+    global _AGENTCORE_NETWORK_CALLS, _AGENTCORE_BUDGET_WARNING_EMITTED
+    limit = _positive_int_env("SIMPLYNEXT_AGENTCORE_MAX_CALLS", DEFAULT_AGENTCORE_MAX_CALLS)
+    with _AGENTCORE_BUDGET_LOCK:
+        if _AGENTCORE_NETWORK_CALLS >= limit:
+            if not _AGENTCORE_BUDGET_WARNING_EMITTED:
+                LOGGER.warning(
+                    "AgentCore search budget reached (%s network attempt(s)); using public providers/cache only",
+                    limit,
+                )
+                _AGENTCORE_BUDGET_WARNING_EMITTED = True
+            return False
+        _AGENTCORE_NETWORK_CALLS += 1
+        return True
+
+
 def _search_aws_agentcore(query: str, max_results: int) -> list[SearchResult]:
     """Call the AWS AgentCore managed Web Search connector through an IAM gateway."""
     gateway_url = _agentcore_gateway_url()
@@ -259,6 +333,13 @@ def _search_aws_agentcore(query: str, max_results: int) -> list[SearchResult]:
         os.getenv("AWS_AGENTCORE_WEB_SEARCH_TOOL", "simplenext-web-search___WebSearch").strip()
         or "simplenext-web-search___WebSearch"
     )
+    cache_path = _agentcore_cache_file(gateway_url, tool_name, query, max_results)
+    cached = _cached_agentcore_results(cache_path)
+    if cached is not None:
+        LOGGER.info("AgentCore search cache hit: %s", query)
+        return cached[:max_results]
+    if not _claim_agentcore_network_call():
+        return []
     protocol_version = (
         os.getenv("AWS_AGENTCORE_MCP_VERSION", AWS_AGENTCORE_MCP_VERSION).strip()
         or AWS_AGENTCORE_MCP_VERSION
@@ -339,6 +420,8 @@ def _search_aws_agentcore(query: str, max_results: int) -> list[SearchResult]:
         )
         if len(results) >= max_results:
             break
+    if results:
+        _save_agentcore_results(cache_path, results)
     return results
 
 

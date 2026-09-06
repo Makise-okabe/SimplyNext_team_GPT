@@ -245,12 +245,16 @@ def test_agentcore_parser_reads_sse_json_rpc_payload() -> None:
     assert web_search._agentcore_json_response(response) == payload
 
 
-def test_agentcore_uses_stateless_mcp_request_metadata(monkeypatch) -> None:
+def test_agentcore_uses_stateless_mcp_request_metadata(monkeypatch, tmp_path) -> None:
     import boto3
     from botocore.credentials import Credentials
 
     monkeypatch.setenv("AWS_AGENTCORE_GATEWAY_URL", "https://gateway.example/mcp")
     monkeypatch.setenv("AWS_AGENTCORE_MCP_VERSION", "2026-07-28")
+    monkeypatch.setenv("SIMPLYNEXT_AGENTCORE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("SIMPLYNEXT_AGENTCORE_MAX_CALLS", "15")
+    monkeypatch.setattr(web_search, "_AGENTCORE_NETWORK_CALLS", 0)
+    monkeypatch.setattr(web_search, "_AGENTCORE_BUDGET_WARNING_EMITTED", False)
     captured = {}
 
     class FakeSession:
@@ -282,6 +286,28 @@ def test_agentcore_uses_stateless_mcp_request_metadata(monkeypatch) -> None:
     assert captured["headers"]["Mcp-Method"] == "tools/call"
     assert captured["headers"]["Mcp-Name"] == "simplenext-web-search___WebSearch"
     assert captured["body"]["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
+
+    monkeypatch.setattr(
+        web_search.httpx,
+        "post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cache should avoid AWS")),
+    )
+    assert web_search._search_aws_agentcore("Amazon software engineer careers", 2) == results
+
+
+def test_agentcore_budget_can_disable_network_calls(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AWS_AGENTCORE_GATEWAY_URL", "https://gateway.example/mcp")
+    monkeypatch.setenv("SIMPLYNEXT_AGENTCORE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("SIMPLYNEXT_AGENTCORE_MAX_CALLS", "0")
+    monkeypatch.setattr(web_search, "_AGENTCORE_NETWORK_CALLS", 0)
+    monkeypatch.setattr(web_search, "_AGENTCORE_BUDGET_WARNING_EMITTED", False)
+    monkeypatch.setattr(
+        web_search.httpx,
+        "post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("budget should avoid AWS")),
+    )
+
+    assert web_search._search_aws_agentcore("Example role", 2) == []
 
 
 def test_host_canonicalizes_www_prefix() -> None:

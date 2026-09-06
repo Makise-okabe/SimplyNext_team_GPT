@@ -47,6 +47,49 @@ def test_careers_anchor_text_discovers_numeric_role(monkeypatch):
     assert resolved.job_page_url == official
 
 
+def test_official_homepage_is_navigation_seed_not_job_button(monkeypatch):
+    homepage = "https://www.bhglobal.com.sg/"
+    official = "https://www.bhglobal.com.sg/jobs/electrical-intern/"
+    target = JobRecord(
+        source_message_id="test",
+        source_subject="Career opportunities",
+        company="BH Global Corporation Ltd",
+        title="Electrical Intern",
+    )
+
+    def fetch(url, **kwargs):
+        if url == homepage:
+            return parse_html_page(
+                url,
+                url,
+                200,
+                '<title>BH Global Corporation Ltd</title>'
+                '<a href="/jobs/electrical-intern/">Electrical Intern</a>',
+            )
+        return parse_html_page(
+            url,
+            url,
+            200,
+            '<title>Electrical Intern - BH Global</title><h1>Electrical Intern</h1>'
+            '<p>Responsibilities and requirements for electrical engineering. '
+            + "Build and test electrical systems. " * 30
+            + "</p>",
+        )
+
+    monkeypatch.setattr(
+        resolver,
+        "search_public_web",
+        lambda *args, **kwargs: [SearchResult("Home : BH Global Corporation Ltd", homepage, "")],
+    )
+    monkeypatch.setattr(resolver, "fetch_public_page", fetch)
+
+    resolved, _ = resolver.resolve_job_link(target)
+
+    assert resolved.job_page_url == official
+    assert resolved.job_page_kind == "official_exact"
+    assert resolved.job_page_url != homepage
+
+
 def test_known_wrong_role_is_not_retained_as_candidate(monkeypatch):
     url = "https://reolink.com/jobs/123"
     monkeypatch.setattr(resolver, "search_public_web", lambda *a, **kw: [SearchResult("AI Engineer - Reolink", url, "")])

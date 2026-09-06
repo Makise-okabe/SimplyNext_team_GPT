@@ -106,6 +106,10 @@ It contains UI-ready `top_matches`, `related_jobs`, evidence levels, resolved pa
 - Best-effort web enrichment for promising roles only
 - Batched semantic Stage 2 with rate-limit backoff and individual recovery
 - Related-role discovery from high-ranking companies
+- Deterministic full-inbox prefilter before live research: 12 strongest roles
+  plus 3 exploration roles by default
+- Demo cost guard: at most 15 AgentCore network attempts per process, with
+  successful search results reused from a 12-hour local cache
 
 ## AWS architecture
 

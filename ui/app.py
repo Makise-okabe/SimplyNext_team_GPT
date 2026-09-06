@@ -122,6 +122,12 @@ def _run_backend(
         str(profile_path),
         "--jobs",
         str(jobs_path),
+        # Deterministic Stage 1 ranks every retained email job. Only this
+        # 12+3 shortlist is allowed into paid/live web research.
+        "--web-primary",
+        "12",
+        "--web-explore",
+        "3",
         "--semantic-top",
         "5",
         "--top",

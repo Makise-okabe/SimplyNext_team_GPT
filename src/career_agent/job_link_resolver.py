@@ -141,11 +141,6 @@ def _looks_job_like(url: str) -> bool:
     return bool(re.search(r"/(?:jobs?|careers?|positions?|openings?)/[^/]+|/(?:jobdetail|job-detail|requisition)/[^/]+", path))
 
 
-def _career_page_like(url: str) -> bool:
-    value = (url or "").lower()
-    return any(marker in value for marker in ("career", "careers", "jobs", "recruit", "join-us", "join-our-team"))
-
-
 def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str] | None:
     identity = f"{result.title} {result.url}"
     if not _resolver_company_match(job.company, identity):
@@ -161,9 +156,11 @@ def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str
     elif (not official) and concrete and overlap >= MIN_SECONDARY_EXACT_TITLE_OVERLAP:
         kind = "secondary_exact"
         confidence = "medium"
-    elif official and (not concrete) and _career_page_like(result.url):
-        # A concrete page for another role is not a generic careers landing page.
-        # Example: Electrical Intern must not resolve to /jobs/mechanical-intern.
+    elif official and not concrete:
+        # Employer home/careers pages are internal discovery seeds only. They
+        # are fetched so an exact role anchor can be followed, but are never
+        # published as the student's job button. A concrete page for another
+        # role still fails above and is not downgraded to a generic seed.
         kind = "company_careers"
         confidence = "low"
     else:

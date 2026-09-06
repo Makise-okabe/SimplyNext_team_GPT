@@ -483,7 +483,13 @@ def _filter_results(
 
 
 def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
-    """Search public web with deterministic relevance checks and provider failover."""
+    """Search AWS plus an independent public provider for candidate recall.
+
+    AgentCore is intentionally capped below ``max_results``. A semantically
+    plausible but wrong brand expansion (for example BH -> Baker Hughes) must
+    not prevent an exact employer page found by Bing/RSS from reaching the
+    downstream company/title/page verifier.
+    """
     if not query.strip():
         return []
 
@@ -496,21 +502,37 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
     }
     constraint = _site_constraint(query)
     variants = _search_variants(query, constraint)
+    collected: list[SearchResult] = []
+    seen: set[str] = set()
+
+    def merge(items: list[SearchResult]) -> None:
+        for item in items:
+            if item.url in seen:
+                continue
+            seen.add(item.url)
+            collected.append(item)
 
     if _agentcore_gateway_url():
         for variant in variants:
             try:
                 aws_results = _filter_results(
-                    _search_aws_agentcore(variant, max_results),
+                    _search_aws_agentcore(variant, max(1, min(4, max_results // 2))),
                     original_query=query,
                     constraint=constraint,
-                    max_results=max_results,
+                    max_results=max(1, min(4, max_results // 2)),
                 )
                 if aws_results:
-                    return aws_results
+                    merge(aws_results)
+                    break
             except Exception as exc:
                 LOGGER.warning("AWS AgentCore web search failed (%s): %s", type(exc).__name__, exc)
                 break
+
+    # A site-scoped result already passed a hard domain filter, so another
+    # provider adds little value. Unscoped job discovery always gets an
+    # independent provider chance before returning AWS candidates.
+    if constraint is not None and collected:
+        return collected[:max_results]
 
     providers = (
         (BING_URL, _parse_bing_results),
@@ -535,7 +557,9 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
                     max_results=max_results,
                 )
                 if results:
-                    return results
+                    merge(results)
+                    return collected[:max_results]
             except Exception:
                 continue
+    return collected[:max_results]
     return []

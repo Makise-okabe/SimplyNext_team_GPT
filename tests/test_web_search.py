@@ -203,7 +203,7 @@ def test_agentcore_provider_is_preferred_and_site_filtered(monkeypatch) -> None:
     ]
 
 
-def test_agentcore_web_search_is_used_when_gateway_is_configured(monkeypatch) -> None:
+def test_agentcore_results_are_combined_with_public_results(monkeypatch) -> None:
     monkeypatch.setenv("AWS_AGENTCORE_GATEWAY_URL", "https://gateway.example/mcp")
     official = SearchResult(
         title="AI Engineer - Reolink",
@@ -211,13 +211,14 @@ def test_agentcore_web_search_is_used_when_gateway_is_configured(monkeypatch) ->
         snippet="Official job description",
     )
     monkeypatch.setattr(web_search, "_search_aws_agentcore", lambda query, max_results: [official])
-    monkeypatch.setattr(
-        web_search,
-        "_request_search",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("public scraping should not run")),
+    public = SearchResult(
+        title="AI Engineer - Reolink official careers",
+        url="https://careers.reolink.com/jobs/456",
+        snippet="Official role page",
     )
+    monkeypatch.setattr(web_search, "_request_search", lambda *args, **kwargs: [public])
     assert web_search.stable_search_api_name() == "aws_agentcore_web_search"
-    assert web_search.search_public_web('"Reolink" "AI Engineer" careers job') == [official]
+    assert web_search.search_public_web('"Reolink" "AI Engineer" careers job') == [official, public]
 
 
 def test_agentcore_parser_reads_sse_json_rpc_payload() -> None:

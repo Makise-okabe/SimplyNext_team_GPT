@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse, quote
 
@@ -88,6 +89,56 @@ def _ats_posting(client, url: str) -> dict | None:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     parts = [p for p in parsed.path.split("/") if p]
+    if host in {"mycareersfuture.gov.sg", "www.mycareersfuture.gov.sg"} and "job" in parts:
+        match = re.search(r"([0-9a-f]{32})$", parsed.path.rstrip("/"), re.I)
+        if not match:
+            return None
+        job_id = match.group(1)
+        response = client.get(f"https://api.mycareersfuture.gov.sg/v2/jobs/{job_id}")
+        if response.status_code == 404:
+            slug = parts[-1][:-33].replace("-", " ")
+            return {
+                "@type": "JobPosting",
+                "title": slug,
+                "description": "This job is no longer available. " * 4,
+                "hiringOrganization": {"name": slug},
+                "identifier": job_id,
+                "validThrough": "1970-01-01",
+                "url": url,
+            }
+        response.raise_for_status()
+        info = response.json()
+        company = (info.get("hiringCompany") or {}).get("name") or (info.get("postedCompany") or {}).get("name") or ""
+        metadata = info.get("metadata") or {}
+        dates = metadata.get("dates") or {}
+        employment = [
+            str(item.get("employmentType") or item.get("name") or "")
+            for item in info.get("employmentTypes") or []
+            if isinstance(item, dict)
+        ]
+        address = info.get("address") or {}
+        location = {
+            "address": {
+                "addressLocality": address.get("street") or address.get("district") or "Singapore",
+                "addressCountry": address.get("overseasCountry") or "Singapore",
+            }
+        }
+        return {
+            "@type": "JobPosting",
+            "title": info.get("title") or "",
+            "description": info.get("description") or "",
+            "hiringOrganization": {"name": company},
+            "identifier": info.get("uuid") or job_id,
+            "jobLocation": location,
+            "employmentType": employment,
+            "validThrough": (
+                dates.get("expiry")
+                or dates.get("expiryDate")
+                or metadata.get("expiryDate")
+                or info.get("expiryDate")
+            ),
+            "url": url,
+        }
     if host.endswith(".myworkdayjobs.com") and "job" in parts:
         index = parts.index("job")
         if index < 1:

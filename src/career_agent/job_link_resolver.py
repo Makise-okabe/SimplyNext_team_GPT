@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, unquote, urlencode
 
 from career_agent.job_research_quality import is_plausible_official_url, is_secondary_url
 from career_agent.models.job_record import JobRecord
@@ -223,6 +223,20 @@ def _query(company: str, title: str) -> str:
     return f'"{company}" "{clean_search_title(title)}"'
 
 
+def _supported_official_board_seeds(company: str, title: str) -> list[str]:
+    """Return official career-board entry points that search engines may not index.
+
+    These are board adapters, not resolved job answers: the fetched board must
+    still return a title-matching active posting, and the detail page must pass
+    the normal company/title/content verification contract.
+    """
+    company_tokens = set(_company_tokens(company))
+    if "lenovo" in company_tokens:
+        query = urlencode({"keyword": clean_search_title(title)})
+        return [f"https://talent.lenovo.com.cn/position?{query}"]
+    return []
+
+
 def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
     """Discover candidates, then verify fetched identity before publishing any URL.
 
@@ -375,6 +389,17 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         elif is_plausible_official_url(url, company):
             best_careers_url = best_careers_url or url
         found = check(url, "email_or_existing_link")
+        if found:
+            return finish(found)
+        if closed:
+            return finish(closed)
+
+    # Some official client-rendered boards are poorly indexed by public search
+    # engines. Give an installed board adapter its official search entry point
+    # directly; it still has to discover and verify the exact live detail page.
+    for seed in _supported_official_board_seeds(company, title):
+        best_careers_url = best_careers_url or seed
+        found = check(seed, "supported_official_career_board")
         if found:
             return finish(found)
         if closed:

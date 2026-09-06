@@ -45,7 +45,13 @@ def main() -> None:
         if attempt.get("reason"):
             print(f"                 reason: {attempt['reason']}")
     if not result.url:
-        raise SystemExit("No verified exact role page found across the complete search and site-navigation flow.")
+        archived_url = resolved.candidate_job_url
+        if archived_url and resolved.candidate_job_kind in {"official_archived", "secondary_archived"}:
+            print("Result     : exact role found / closed")
+            print(f"Archived   : {archived_url}")
+            print("Action     : keep as job evidence; do not present it as an active application")
+            return
+        raise SystemExit("No active or archived exact role page passed the complete verification flow.")
     print(f"Result     : {result.kind} / {result.confidence}")
     print(f"URL        : {result.url}")
 

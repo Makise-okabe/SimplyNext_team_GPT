@@ -40,6 +40,7 @@ DEFAULT_AGENTCORE_MAX_CALLS = 15
 DEFAULT_AGENTCORE_CACHE_TTL_SECONDS = 12 * 60 * 60
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_WEB_SEARCH_MODEL = "groq/compound-mini"
+GROQ_BROWSER_SEARCH_MODEL = "openai/gpt-oss-20b"
 DEFAULT_GROQ_SEARCH_MAX_CALLS = 15
 LOGGER = logging.getLogger(__name__)
 _AGENTCORE_BUDGET_LOCK = Lock()
@@ -311,30 +312,70 @@ def _groq_search_result_items(message: dict) -> list[dict]:
     return items
 
 
+def _groq_message_urls(message: dict) -> list[str]:
+    """Read cited URLs from both Compound and GPT-OSS browser responses."""
+    urls: list[str] = []
+    for annotation in message.get("annotations") or []:
+        if not isinstance(annotation, dict):
+            continue
+        citation = annotation.get("url_citation") or annotation
+        if isinstance(citation, dict) and citation.get("url"):
+            urls.append(str(citation["url"]))
+    content = message.get("content") or ""
+    if isinstance(content, str):
+        urls.extend(re.findall(r"https?://[^\s<>()\]\[\"']+", content))
+    return [url.rstrip(".,;:!?") for url in urls]
+
+
+def _groq_search_payload(query: str, model: str) -> dict:
+    prompt = (
+        "Use live web search to find this exact Singapore job. Return the exact employer role URL(s), "
+        "preferring the employer careers page, then MyCareersFuture, LinkedIn, JobStreet, Foundit, or Glints. "
+        "Never substitute a similar company or different role: " + query
+    )
+    payload: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+    }
+    if model.startswith("groq/compound"):
+        # Web search is enabled by default, but keeping this restriction avoids
+        # code execution and website visits. Do not add undocumented locale
+        # fields: they caused 413 responses on otherwise tiny requests.
+        payload["compound_custom"] = {"tools": {"enabled_tools": ["web_search"]}}
+    else:
+        payload["tools"] = [{"type": "browser_search"}]
+        payload["tool_choice"] = "required"
+        payload["reasoning_effort"] = "low"
+    return payload
+
+
+def _post_groq_search(api_key: str, payload: dict) -> httpx.Response:
+    return httpx.post(
+        GROQ_CHAT_URL,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=20.0,
+    )
+
+
 def search_groq_grounded(query: str, max_results: int = 8) -> list[SearchResult]:
     """One token-capped server-side search used only after normal providers fail."""
     api_key = os.getenv("GROQ_API_KEY", "").strip()
     if not api_key or not query.strip() or not _claim_groq_network_call():
         return []
-    response = httpx.post(
-        GROQ_CHAT_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": os.getenv("GROQ_WEB_SEARCH_MODEL", GROQ_WEB_SEARCH_MODEL).strip() or GROQ_WEB_SEARCH_MODEL,
-            "messages": [{
-                "role": "user",
-                "content": (
-                    "Search the live web for this exact job. Return sources for the exact employer and role. "
-                    "Prioritize the employer job page, then MyCareersFuture, LinkedIn, JobStreet, Foundit or Glints. "
-                    "Do not substitute a similarly named company or a different role. Query: " + query
-                ),
-            }],
-            "compound_custom": {"tools": {"enabled_tools": ["web_search"]}},
-            "search_settings": {"country": "singapore"},
-            "temperature": 0,
-        },
-        timeout=20.0,
-    )
+    model = os.getenv("GROQ_WEB_SEARCH_MODEL", GROQ_WEB_SEARCH_MODEL).strip() or GROQ_WEB_SEARCH_MODEL
+    response = _post_groq_search(api_key, _groq_search_payload(query, model))
+    if response.status_code == 413 and model.startswith("groq/compound"):
+        # Compound's internal web result can occasionally exceed its request
+        # envelope even when our own payload is tiny. Retry through Groq's
+        # separately supported GPT-OSS browser-search implementation.
+        fallback_model = (
+            os.getenv("GROQ_BROWSER_SEARCH_MODEL", GROQ_BROWSER_SEARCH_MODEL).strip()
+            or GROQ_BROWSER_SEARCH_MODEL
+        )
+        LOGGER.warning("Groq Compound returned 413; retrying with %s browser search", fallback_model)
+        response = _post_groq_search(api_key, _groq_search_payload(query, fallback_model))
     if response.is_error:
         detail = " ".join(response.text.split())[:1000] or "<empty response>"
         raise RuntimeError(f"Groq grounded search HTTP {response.status_code}: {detail}")
@@ -351,6 +392,10 @@ def search_groq_grounded(query: str, max_results: int = 8) -> list[SearchResult]
             href=str(item.get("url") or ""),
             snippet=str(item.get("content") or item.get("text") or ""),
         )
+        if len(results) >= max_results:
+            break
+    for url in _groq_message_urls(message or {}):
+        _append_result(results, seen, title=url, href=url)
         if len(results) >= max_results:
             break
     LOGGER.warning("Groq grounded web search: %s URL result(s) for %s", len(results), query)

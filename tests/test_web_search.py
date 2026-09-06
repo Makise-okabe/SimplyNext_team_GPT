@@ -402,6 +402,38 @@ def test_groq_grounded_search_reads_only_executed_tool_urls(monkeypatch):
     assert [row.url for row in rows] == [url]
 
 
+def test_groq_grounded_search_retries_413_with_browser_search(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.setenv("GROQ_WEB_SEARCH_MODEL", "groq/compound-mini")
+    monkeypatch.setenv("SIMPLYNEXT_GROQ_SEARCH_MAX_CALLS", "15")
+    monkeypatch.setattr(web_search, "_GROQ_NETWORK_CALLS", 0)
+    url = "https://www.foundit.sg/job/full-stack-java-developer-conex-healthcare-11982036"
+    payloads = []
+
+    def fake_post(endpoint, **kwargs):
+        payloads.append(kwargs["json"])
+        if len(payloads) == 1:
+            return httpx.Response(
+                413,
+                json={"error": {"message": "Request Entity Too Large"}},
+                request=httpx.Request("POST", endpoint),
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": f"Exact listing: {url}"}}]},
+            request=httpx.Request("POST", endpoint),
+        )
+
+    monkeypatch.setattr(web_search.httpx, "post", fake_post)
+    rows = web_search.search_groq_grounded('"CoNEX Healthcare" "Full Stack Java Developer"')
+
+    assert [row.url for row in rows] == [url]
+    assert "search_settings" not in payloads[0]
+    assert payloads[1]["model"] == "openai/gpt-oss-20b"
+    assert payloads[1]["tools"] == [{"type": "browser_search"}]
+    assert payloads[1]["tool_choice"] == "required"
+
+
 def test_host_canonicalizes_www_prefix() -> None:
     assert host("https://www.reolink.com/careers") == "reolink.com"
     assert host("https://reolink.com/careers") == "reolink.com"

@@ -154,7 +154,10 @@ def _looks_job_like(url: str) -> bool:
         return True
     if (parsed.hostname or "").endswith(".lever.co"):
         return len([p for p in path.split("/") if p]) >= 2
-    return bool(re.search(r"/(?:jobs?|careers?|positions?|openings?)/[^/]+|/(?:jobdetail|job-detail|requisition)/[^/]+", path))
+    return bool(re.search(
+        r"/(?:jobs?|careers?|positions?|openings?|opportunities)/[^/]+|/(?:jobdetail|job-detail|requisition)/[^/]+",
+        path,
+    ))
 
 
 def _looks_career_seed(url: str) -> bool:

@@ -186,6 +186,33 @@ def test_resolver_rejects_mobile_application_role_for_chip_design(monkeypatch):
     assert resolved.job_page_url is None
 
 
+@pytest.mark.parametrize("url", [
+    "https://www.mycareersfuture.gov.sg/job/engineering/full-stack-java-developer-conex-healthcare-071e6038cf90444da907ff35beee6cae",
+    "https://www.foundit.sg/job/full-stack-java-developer-conex-healthcare-pte-ltd-singapore-11982036",
+    "https://glints.com/opportunities/s/full-stack-java-developer/f3ee58ae-d300-428b-a7cb-4d283ffcca7b",
+])
+def test_resolver_accepts_verified_specific_singapore_job_platforms(monkeypatch, url):
+    monkeypatch.setattr(
+        job_link_resolver,
+        "search_public_web",
+        lambda query, **kwargs: [SearchResult(
+            "Full Stack Java Developer - CoNEX Healthcare Pte Ltd",
+            url,
+            "Singapore full-time job",
+        )],
+    )
+    text = "Full Stack Java Developer\nCoNEX Healthcare Pte Ltd\nResponsibilities\n" + "Build Java web applications and APIs. " * 20 + "\nRequirements\nJava development experience."
+    monkeypatch.setattr(
+        job_link_resolver,
+        "fetch_public_page",
+        lambda target, **kwargs: FetchedPage(target, target, 200, "Full Stack Java Developer - CoNEX Healthcare", text, (), ("Full Stack Java Developer",)),
+    )
+    resolved, result = resolve_job_link(_job("CoNEX Healthcare Pte Ltd", "Full Stack Java Developer"))
+    assert result.url == url
+    assert result.kind == "secondary_exact"
+    assert resolved.job_page_confidence == "medium"
+
+
 def test_resolver_does_not_treat_facebook_as_face_ai(monkeypatch):
     monkeypatch.setattr(
         job_link_resolver,

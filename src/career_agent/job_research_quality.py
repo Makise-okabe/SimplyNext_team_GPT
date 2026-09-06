@@ -5,6 +5,13 @@ from urllib.parse import unquote, urlparse
 
 AGGREGATOR_HOST_MARKERS = (
     "linkedin.com",
+    "mycareersfuture.gov.sg",
+    "foundit.",
+    "glints.com",
+    "internsg.com",
+    "internship.sg",
+    "bebee.com",
+    "jobrapido.com",
     "indeed.",
     "glassdoor.",
     "jobstreet.",

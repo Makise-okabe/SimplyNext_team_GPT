@@ -244,6 +244,45 @@ def test_agentcore_parser_reads_sse_json_rpc_payload() -> None:
     assert web_search._agentcore_json_response(response) == payload
 
 
+def test_agentcore_uses_stateless_mcp_request_metadata(monkeypatch) -> None:
+    import boto3
+    from botocore.credentials import Credentials
+
+    monkeypatch.setenv("AWS_AGENTCORE_GATEWAY_URL", "https://gateway.example/mcp")
+    monkeypatch.setenv("AWS_AGENTCORE_MCP_VERSION", "2026-07-28")
+    captured = {}
+
+    class FakeSession:
+        def get_credentials(self):
+            return Credentials("test-access", "test-secret", "test-session")
+
+    monkeypatch.setattr(boto3, "Session", lambda **kwargs: FakeSession())
+
+    def fake_post(url, *, content, headers, timeout):
+        captured.update(url=url, body=json.loads(content), headers=headers, timeout=timeout)
+        nested = json.dumps({
+            "results": [{
+                "title": "Amazon Software Engineer",
+                "url": "https://www.amazon.jobs/en/jobs/123/software-engineer",
+                "text": "Official role",
+            }]
+        })
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": nested}]}},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(web_search.httpx, "post", fake_post)
+    results = web_search._search_aws_agentcore("Amazon software engineer careers", 2)
+
+    assert results[0].url == "https://www.amazon.jobs/en/jobs/123/software-engineer"
+    assert captured["headers"]["MCP-Protocol-Version"] == "2026-07-28"
+    assert captured["headers"]["Mcp-Method"] == "tools/call"
+    assert captured["headers"]["Mcp-Name"] == "simplenext-web-search___WebSearch"
+    assert captured["body"]["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
+
+
 def test_host_canonicalizes_www_prefix() -> None:
     assert host("https://www.reolink.com/careers") == "reolink.com"
     assert host("https://reolink.com/careers") == "reolink.com"

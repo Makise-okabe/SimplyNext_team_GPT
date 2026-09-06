@@ -13,6 +13,7 @@ ROLE_NAME = "SimplyNextAgentCoreWebSearchRole"
 ROLE_POLICY_NAME = "SimplyNextAgentCoreWebSearchPolicy"
 GATEWAY_NAME = "simplenext-career-search"
 TARGET_NAME = "simplenext-web-search"
+MCP_PROTOCOL_VERSION = "2026-07-28"
 
 
 def _items(payload: dict, *keys: str) -> list[dict]:
@@ -161,12 +162,30 @@ def main() -> None:
             name=GATEWAY_NAME,
             roleArn=role["Arn"],
             protocolType="MCP",
+            protocolConfiguration={
+                "mcp": {"supportedVersions": [MCP_PROTOCOL_VERSION]}
+            },
             authorizerType="AWS_IAM",
         )
     gateway_id = gateway.get("gatewayId") or gateway.get("gatewayIdentifier")
     if not gateway_id:
         raise RuntimeError(f"AWS returned no gateway ID: {gateway}")
     gateway = _wait(agentcore, "get_gateway", "gatewayIdentifier", gateway_id)
+    supported_versions = (
+        gateway.get("protocolConfiguration", {}).get("mcp", {}).get("supportedVersions", [])
+    )
+    if MCP_PROTOCOL_VERSION not in supported_versions:
+        agentcore.update_gateway(
+            gatewayIdentifier=gateway_id,
+            name=gateway["name"],
+            roleArn=gateway["roleArn"],
+            protocolType="MCP",
+            protocolConfiguration={
+                "mcp": {"supportedVersions": [MCP_PROTOCOL_VERSION]}
+            },
+            authorizerType=gateway["authorizerType"],
+        )
+        gateway = _wait(agentcore, "get_gateway", "gatewayIdentifier", gateway_id)
 
     target = _find_target(agentcore, gateway_id)
     if target is None:
@@ -203,6 +222,7 @@ def main() -> None:
     print("AWS AgentCore Web Search is configured.")
     print("Add these non-secret values to .env:")
     print(f"AWS_AGENTCORE_REGION={REGION}")
+    print(f"AWS_AGENTCORE_MCP_VERSION={MCP_PROTOCOL_VERSION}")
     print(f"AWS_AGENTCORE_GATEWAY_URL={gateway_url}")
     print(f"AWS_AGENTCORE_WEB_SEARCH_TOOL={TARGET_NAME}___WebSearch")
     print("Then run: uv run python scripts/check_aws_access.py")

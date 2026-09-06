@@ -29,6 +29,7 @@ DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 DUCKDUCKGO_LITE_URL = "https://lite.duckduckgo.com/lite/"
 SEARCH_TIMEOUT_SECONDS = 6.0
 AWS_SEARCH_TIMEOUT_SECONDS = 20.0
+AWS_AGENTCORE_MCP_VERSION = "2026-07-28"
 LOGGER = logging.getLogger(__name__)
 SITE_PATTERN = re.compile(r"(?i)(?:^|\s)site:([^\s\"']+)")
 QUOTED_PATTERN = re.compile(r'"([^\"]+)"')
@@ -258,19 +259,36 @@ def _search_aws_agentcore(query: str, max_results: int) -> list[SearchResult]:
         os.getenv("AWS_AGENTCORE_WEB_SEARCH_TOOL", "simplenext-web-search___WebSearch").strip()
         or "simplenext-web-search___WebSearch"
     )
-    protocol_version = os.getenv("AWS_AGENTCORE_MCP_VERSION", "2025-11-25").strip()
+    protocol_version = (
+        os.getenv("AWS_AGENTCORE_MCP_VERSION", AWS_AGENTCORE_MCP_VERSION).strip()
+        or AWS_AGENTCORE_MCP_VERSION
+    )
     arguments = {"query": query[:200], "maxResults": max(1, min(max_results, 25))}
+    request_meta = {
+        "io.modelcontextprotocol/protocolVersion": protocol_version,
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "simplenext-career-agent",
+            "version": "0.1.0",
+        },
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
     rpc_payload = {
         "jsonrpc": "2.0",
         "id": "simplenext-web-search",
         "method": "tools/call",
-        "params": {"name": tool_name, "arguments": arguments},
+        "params": {
+            "name": tool_name,
+            "arguments": arguments,
+            "_meta": request_meta,
+        },
     }
     body = json.dumps(rpc_payload, separators=(",", ":")).encode("utf-8")
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
         "MCP-Protocol-Version": protocol_version,
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": tool_name,
     }
 
     session = boto3.Session(profile_name=profile, region_name=region)
@@ -285,7 +303,11 @@ def _search_aws_agentcore(query: str, max_results: int) -> list[SearchResult]:
         headers=dict(request.headers.items()),
         timeout=AWS_SEARCH_TIMEOUT_SECONDS,
     )
-    response.raise_for_status()
+    if response.is_error:
+        detail = " ".join(response.text.split())[:1200] or "<empty response>"
+        raise RuntimeError(
+            f"AgentCore Gateway returned HTTP {response.status_code}: {detail}"
+        )
     payload = _agentcore_json_response(response)
     if payload.get("error"):
         raise RuntimeError(f"AgentCore Web Search error: {payload['error']}")

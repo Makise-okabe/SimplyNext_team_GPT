@@ -1,3 +1,4 @@
+import httpx
 import pytest
 from career_agent.tools.web_fetch import FetchedPage
 
@@ -296,6 +297,68 @@ def test_resolver_follows_lenovo_dynamic_board_to_official_job(monkeypatch):
     assert result.kind == "official_exact"
     assert resolved.job_page_confidence == "high"
     assert resolved.job_id == "2399"
+
+
+def test_resolver_reserves_fetches_for_grounded_dynamic_board(monkeypatch):
+    board = "https://talent.lenovo.com.cn/position?projectType=3"
+    detail = "https://talent.lenovo.com.cn/position/detail?id=2399"
+    weak = [
+        SearchResult("Lenovo support", "https://support.lenovo.com/sg/en/", "Support"),
+        SearchResult("Lenovo PCs", "https://www.lenovo.com/sg/en/pc/", "Products"),
+        SearchResult("Solution Architect", "https://jobs.lenovo.com/en_US/careers/JobDetail/Solution-Architect/76610", "Different role"),
+        SearchResult("AI Technical Architect", "https://jobs.lenovo.com/en_US/careers/JobDetail/AI-Technical-Architect/74165", "Different role"),
+    ]
+    monkeypatch.setattr(job_link_resolver, "search_public_web", lambda *args, **kwargs: weak)
+    monkeypatch.setattr(
+        job_link_resolver,
+        "search_groq_grounded",
+        lambda *args, **kwargs: [SearchResult(
+            "AI Solution Architect - Global Future Leaders",
+            board,
+            "Lenovo China Beijing",
+        )],
+    )
+    fetched = []
+
+    def fetch(url, **kwargs):
+        fetched.append(url)
+        if url == board:
+            return FetchedPage(
+                url, url, 200, "Lenovo Campus Recruitment", "Recruitment positions",
+                (detail,), (), (), "public_career_api",
+                ((detail, "AI Solution Architect Global Future Leaders SSG"),),
+            )
+        if url == detail:
+            description = (
+                "Responsibilities\nDevelop RAG and LLM applications using Python. " * 8
+                + "\nRequirements\nPyTorch or TensorFlow, Linux and Git."
+            )
+            return FetchedPage(
+                url, url, 200, "Lenovo Campus Recruitment", "", (), (), ({
+                    "@type": "JobPosting",
+                    "title": "AI Solution Architect",
+                    "description": description,
+                    "hiringOrganization": {"name": "Lenovo"},
+                    "identifier": "2399",
+                },), "public_ats_detail",
+            )
+        raise httpx.HTTPStatusError(
+            "blocked",
+            request=httpx.Request("GET", url),
+            response=httpx.Response(403),
+        )
+
+    monkeypatch.setattr(job_link_resolver, "fetch_public_page", fetch)
+    resolved, result = resolve_job_link(
+        _job("Lenovo China", "Global Future Leaders: AI Solution Architect")
+    )
+
+    assert result.url == detail
+    assert result.kind == "official_exact"
+    assert board in fetched and detail in fetched
+    assert "https://support.lenovo.com/sg/en/" not in fetched
+    assert "https://www.lenovo.com/sg/en/pc/" not in fetched
+    assert len(fetched) <= job_link_resolver.TOTAL_FETCH_LIMIT
 
 
 def test_resolver_does_not_treat_facebook_as_face_ai(monkeypatch):

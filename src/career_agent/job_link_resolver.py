@@ -14,6 +14,8 @@ from career_agent.research_session import current_session
 
 MIN_OFFICIAL_EXACT_TITLE_OVERLAP = 0.65
 MIN_SECONDARY_EXACT_TITLE_OVERLAP = 0.80
+NORMAL_SEARCH_FETCH_LIMIT = 4
+TOTAL_FETCH_LIMIT = 6
 TITLE_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 TITLE_STOPWORDS = {
     "the", "and", "for", "with", "role", "position", "hiring",
@@ -168,9 +170,13 @@ def _looks_career_seed(url: str) -> bool:
         return False
     path = unquote(urlparse(url).path).lower().rstrip("/")
     return bool(re.search(
-        r"/(?:careers?|jobs?|join-us|join-our-team|work-with-us|vacancies|opportunities)(?:/|$)",
+        r"/(?:careers?|jobs?|positions?|join-us|join-our-team|work-with-us|vacancies|opportunities)(?:/|$)",
         path,
     ))
+
+
+def _is_company_root(url: str) -> bool:
+    return urlparse(url).path.rstrip("/") == ""
 
 
 def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str] | None:
@@ -191,7 +197,7 @@ def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str
     elif (not official) and concrete and overlap >= MIN_SECONDARY_EXACT_TITLE_OVERLAP:
         kind = "secondary_exact"
         confidence = "medium"
-    elif official and not concrete:
+    elif official and not concrete and (_looks_career_seed(result.url) or _is_company_root(result.url)):
         # Employer home/careers pages are internal discovery seeds only. They
         # are fetched so an exact role anchor can be followed, but are never
         # published as the student's job button. A concrete page for another
@@ -285,7 +291,7 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
 
     def check(url, query):
         nonlocal fetched, closed, archived, best_secondary, best_careers_url, best_candidate
-        if not public_http_url(url) or url in tried or fetched >= 6:
+        if not public_http_url(url) or url in tried or fetched >= TOTAL_FETCH_LIMIT:
             return None
         tried.add(url)
         fetched += 1
@@ -387,7 +393,7 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         queries[1] = f'site:{official_hosts[0]} {cleaned}'
     if job.job_id:
         queries.insert(0, f'"{company}" "{job.job_id}"')
-    def inspect_results(results, source_query):
+    def inspect_results(results, source_query, *, fetch_limit=NORMAL_SEARCH_FETCH_LIMIT):
         nonlocal best_careers_url
         # Score the mixed AWS/public candidate pool before fetching. Search
         # metadata alone never publishes an official button, and page fetches
@@ -409,6 +415,8 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
                     best_careers_url = best_careers_url or result.url
         scored.sort(key=lambda item: (not is_plausible_official_url(item[1].url, company), -item[0]))
         for _, result in scored:
+            if fetched >= fetch_limit:
+                break
             found = check(result.url, source_query)
             if found:
                 return found
@@ -420,20 +428,24 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         found = inspect_results(session.search(query_used, search_public_web), query_used)
         if found:
             return finish(found)
-        if fetched >= 6:
+        if fetched >= NORMAL_SEARCH_FETCH_LIMIT:
             break
 
     # Normal public/AWS search can be blocked or have weak recall on small
     # Singapore employers. Spend at most one grounded Groq search on a role,
     # and only after every cheaper search path failed to produce a verified URL.
-    if not closed and fetched < 6:
+    if not closed and fetched < TOTAL_FETCH_LIMIT:
         groq_query = f'"{company}" "{cleaned}" Singapore job'
         try:
             groq_results = search_groq_grounded(groq_query, max_results=10)
         except Exception as exc:
             attempts.append({"url": "groq://web-search", "status": "unavailable", "reason": f"{type(exc).__name__}: {exc}", "query": groq_query})
             groq_results = []
-        found = inspect_results(groq_results, "groq_grounded_web_search")
+        found = inspect_results(
+            groq_results,
+            "groq_grounded_web_search",
+            fetch_limit=TOTAL_FETCH_LIMIT,
+        )
         if found:
             return finish(found)
     if best_secondary:

@@ -6,7 +6,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 from career_agent.job_research_quality import is_plausible_official_url, is_secondary_url
 from career_agent.models.job_record import JobRecord
-from career_agent.tools.web_search import SearchResult
+from career_agent.tools.web_search import SearchResult, search_groq_grounded
 from career_agent.tools.web_search_aggregate import search_public_web_aggregated
 from career_agent.tools.web_fetch import fetch_public_page, public_http_url
 from career_agent.job_page_verifier import apply_page_verification, clear_unverified_links, clean_search_title, verify_job_page
@@ -385,11 +385,11 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         queries[1] = f'site:{official_hosts[0]} {cleaned}'
     if job.job_id:
         queries.insert(0, f'"{company}" "{job.job_id}"')
-    for query_used in list(dict.fromkeys(queries))[:3]:
+    def inspect_results(results, source_query):
+        nonlocal best_careers_url
         # Score the mixed AWS/public candidate pool before fetching. Search
         # metadata alone never publishes an official button, and page fetches
         # remain capped at six for the role.
-        results = session.search(query_used, search_public_web)
         scored = []
         for result in results:
             score = _score_result(job, result)
@@ -407,13 +407,33 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
                     best_careers_url = best_careers_url or result.url
         scored.sort(key=lambda item: (not is_plausible_official_url(item[1].url, company), -item[0]))
         for _, result in scored:
-            found = check(result.url, query_used)
+            found = check(result.url, source_query)
             if found:
-                return finish(found)
+                return found
             if closed:
-                return finish(closed)
+                return closed
+        return None
+
+    for query_used in list(dict.fromkeys(queries))[:3]:
+        found = inspect_results(session.search(query_used, search_public_web), query_used)
+        if found:
+            return finish(found)
         if fetched >= 6:
             break
+
+    # Normal public/AWS search can be blocked or have weak recall on small
+    # Singapore employers. Spend at most one grounded Groq search on a role,
+    # and only after every cheaper search path failed to produce a verified URL.
+    if not closed and fetched < 6:
+        groq_query = f'"{company}" "{cleaned}" Singapore job'
+        try:
+            groq_results = search_groq_grounded(groq_query, max_results=10)
+        except Exception as exc:
+            attempts.append({"url": "groq://web-search", "status": "unavailable", "reason": f"{type(exc).__name__}: {exc}", "query": groq_query})
+            groq_results = []
+        found = inspect_results(groq_results, "groq_grounded_web_search")
+        if found:
+            return finish(found)
     if best_secondary:
         return finish(best_secondary)
     if archived:

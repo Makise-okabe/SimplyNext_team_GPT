@@ -38,10 +38,16 @@ AWS_SEARCH_TIMEOUT_SECONDS = 20.0
 AWS_AGENTCORE_MCP_VERSION = "2026-07-28"
 DEFAULT_AGENTCORE_MAX_CALLS = 15
 DEFAULT_AGENTCORE_CACHE_TTL_SECONDS = 12 * 60 * 60
+GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_WEB_SEARCH_MODEL = "groq/compound-mini"
+DEFAULT_GROQ_SEARCH_MAX_CALLS = 15
 LOGGER = logging.getLogger(__name__)
 _AGENTCORE_BUDGET_LOCK = Lock()
 _AGENTCORE_NETWORK_CALLS = 0
 _AGENTCORE_BUDGET_WARNING_EMITTED = False
+_GROQ_BUDGET_LOCK = Lock()
+_GROQ_NETWORK_CALLS = 0
+_GROQ_BUDGET_WARNING_EMITTED = False
 SITE_PATTERN = re.compile(r"(?i)(?:^|\s)site:([^\s\"']+)")
 QUOTED_PATTERN = re.compile(r'"([^\"]+)"')
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
@@ -279,6 +285,74 @@ def _positive_int_env(name: str, default: int) -> int:
         return max(0, int(os.getenv(name, str(default))))
     except ValueError:
         return default
+
+
+def _claim_groq_network_call() -> bool:
+    global _GROQ_NETWORK_CALLS, _GROQ_BUDGET_WARNING_EMITTED
+    limit = _positive_int_env("SIMPLYNEXT_GROQ_SEARCH_MAX_CALLS", DEFAULT_GROQ_SEARCH_MAX_CALLS)
+    with _GROQ_BUDGET_LOCK:
+        if _GROQ_NETWORK_CALLS >= limit:
+            if not _GROQ_BUDGET_WARNING_EMITTED:
+                LOGGER.warning("Groq grounded-search budget reached (%s call(s))", limit)
+                _GROQ_BUDGET_WARNING_EMITTED = True
+            return False
+        _GROQ_NETWORK_CALLS += 1
+        return True
+
+
+def _groq_search_result_items(message: dict) -> list[dict]:
+    items: list[dict] = []
+    for tool in message.get("executed_tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        search_results = tool.get("search_results") or {}
+        if isinstance(search_results, dict):
+            items.extend(item for item in search_results.get("results") or [] if isinstance(item, dict))
+    return items
+
+
+def search_groq_grounded(query: str, max_results: int = 8) -> list[SearchResult]:
+    """One token-capped server-side search used only after normal providers fail."""
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    if not api_key or not query.strip() or not _claim_groq_network_call():
+        return []
+    response = httpx.post(
+        GROQ_CHAT_URL,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": os.getenv("GROQ_WEB_SEARCH_MODEL", GROQ_WEB_SEARCH_MODEL).strip() or GROQ_WEB_SEARCH_MODEL,
+            "messages": [{
+                "role": "user",
+                "content": (
+                    "Search the live web for this exact job. Return sources for the exact employer and role. "
+                    "Prioritize the employer job page, then MyCareersFuture, LinkedIn, JobStreet, Foundit or Glints. "
+                    "Do not substitute a similarly named company or a different role. Query: " + query
+                ),
+            }],
+            "compound_custom": {"tools": {"enabled_tools": ["web_search"]}},
+            "search_settings": {"country": "singapore"},
+            "temperature": 0,
+        },
+        timeout=20.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    choices = payload.get("choices") or []
+    message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+    for item in _groq_search_result_items(message or {}):
+        _append_result(
+            results,
+            seen,
+            title=str(item.get("title") or ""),
+            href=str(item.get("url") or ""),
+            snippet=str(item.get("content") or item.get("text") or ""),
+        )
+        if len(results) >= max_results:
+            break
+    LOGGER.warning("Groq grounded web search: %s URL result(s) for %s", len(results), query)
+    return results
 
 
 def _agentcore_cache_file(

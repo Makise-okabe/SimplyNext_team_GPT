@@ -377,6 +377,31 @@ def test_agentcore_budget_can_disable_network_calls(monkeypatch, tmp_path) -> No
     assert web_search._search_aws_agentcore("Example role", 2) == []
 
 
+def test_groq_grounded_search_reads_only_executed_tool_urls(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.setenv("SIMPLYNEXT_GROQ_SEARCH_MAX_CALLS", "15")
+    monkeypatch.setattr(web_search, "_GROQ_NETWORK_CALLS", 0)
+    url = "https://www.foundit.sg/job/full-stack-java-developer-conex-healthcare-11982036"
+
+    def fake_post(endpoint, **kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {
+                "content": "Ignore generated prose and use executed results.",
+                "executed_tools": [{"search_results": {"results": [{
+                    "title": "Full Stack Java Developer - CoNEX Healthcare",
+                    "url": url,
+                    "content": "Exact Singapore job",
+                }]}}],
+            }}]},
+            request=httpx.Request("POST", endpoint),
+        )
+
+    monkeypatch.setattr(web_search.httpx, "post", fake_post)
+    rows = web_search.search_groq_grounded('"CoNEX Healthcare" "Full Stack Java Developer"')
+    assert [row.url for row in rows] == [url]
+
+
 def test_host_canonicalizes_www_prefix() -> None:
     assert host("https://www.reolink.com/careers") == "reolink.com"
     assert host("https://reolink.com/careers") == "reolink.com"

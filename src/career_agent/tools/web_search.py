@@ -126,6 +126,25 @@ def _relax_site_query(query: str) -> str:
     return re.sub(SITE_PATTERN, f" {target}", query, count=1).strip()
 
 
+def _agentcore_arguments(query: str, max_results: int) -> dict:
+    """Translate search syntax into the AgentCore connector's native schema.
+
+    AgentCore does not document Google-style ``site:`` operators. Connector
+    v1.2.0 exposes a real domain include filter, so send the hostname there and
+    keep only the human search terms in ``query``.
+    """
+    arguments: dict = {"query": query[:200], "maxResults": max(1, min(max_results, 25))}
+    constraint = _site_constraint(query)
+    if constraint is None:
+        return arguments
+    target_host, _ = constraint
+    search_terms = SITE_PATTERN.sub(" ", query, count=1)
+    search_terms = re.sub(r"\s+", " ", search_terms).strip() or target_host
+    arguments["query"] = search_terms[:200]
+    arguments["filters"] = {"domainFilter": {"include": [target_host]}}
+    return arguments
+
+
 def _result_matches_site(result: SearchResult, constraint: tuple[str, str] | None) -> bool:
     if constraint is None:
         return True
@@ -350,7 +369,7 @@ def _search_aws_agentcore(query: str, max_results: int, *, bypass_cache: bool = 
         os.getenv("AWS_AGENTCORE_MCP_VERSION", AWS_AGENTCORE_MCP_VERSION).strip()
         or AWS_AGENTCORE_MCP_VERSION
     )
-    arguments = {"query": query[:200], "maxResults": max(1, min(max_results, 25))}
+    arguments = _agentcore_arguments(query, max_results)
     request_meta = {
         "io.modelcontextprotocol/protocolVersion": protocol_version,
         "io.modelcontextprotocol/clientInfo": {
@@ -620,10 +639,10 @@ def search_public_web(query: str, max_results: int = 5) -> list[SearchResult]:
         for variant in variants[:1]:
             try:
                 aws_results = _filter_results(
-                    _search_aws_agentcore(variant, max(1, min(4, max_results // 2))),
+                    _search_aws_agentcore(variant, max(1, min(2, max_results // 3))),
                     original_query=query,
                     constraint=constraint,
-                    max_results=max(1, min(4, max_results // 2)),
+                    max_results=max(1, min(2, max_results // 3)),
                 )
                 if aws_results:
                     merge(aws_results)

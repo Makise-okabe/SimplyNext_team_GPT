@@ -9,6 +9,7 @@ from career_agent.tools import web_search
 from career_agent.tools.web_search import (
     SearchResult,
     _apply_site_constraint,
+    _agentcore_arguments,
     _parse_bing_results,
     _parse_lite_results,
     _simplify_query,
@@ -16,6 +17,18 @@ from career_agent.tools.web_search import (
     _unwrap_bing_url,
     _unwrap_duckduckgo_url,
 )
+
+
+def test_agentcore_site_syntax_uses_native_domain_filter() -> None:
+    arguments = _agentcore_arguments(
+        'site:bhglobal.com.sg/jobs "Electrical Intern"',
+        8,
+    )
+    assert arguments == {
+        "query": '"Electrical Intern"',
+        "maxResults": 8,
+        "filters": {"domainFilter": {"include": ["bhglobal.com.sg"]}},
+    }
 
 
 def test_unwrap_duckduckgo_redirect_url() -> None:
@@ -311,6 +324,43 @@ def test_agentcore_uses_stateless_mcp_request_metadata(monkeypatch, tmp_path) ->
     )
     assert web_search._search_aws_agentcore("Amazon software engineer careers", 2) == results
 
+
+def test_agentcore_request_sends_native_domain_filter(monkeypatch, tmp_path) -> None:
+    import boto3
+    from botocore.credentials import Credentials
+
+    monkeypatch.setenv("AWS_AGENTCORE_GATEWAY_URL", "https://gateway.example/mcp")
+    monkeypatch.setenv("SIMPLYNEXT_AGENTCORE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(web_search, "_AGENTCORE_NETWORK_CALLS", 0)
+    captured = {}
+
+    class FakeSession:
+        def get_credentials(self):
+            return Credentials("access", "secret", "session")
+
+    monkeypatch.setattr(boto3, "Session", lambda **kwargs: FakeSession())
+
+    def fake_post(url, *, content, headers, timeout):
+        captured.update(json.loads(content))
+        body = {"results": [{
+            "title": "Electrical Intern",
+            "url": "https://www.bhglobal.com.sg/jobs/electrical-intern/",
+            "text": "Job Scope",
+        }]}
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "result": {"structuredContent": body}},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(web_search.httpx, "post", fake_post)
+    rows = web_search._search_aws_agentcore(
+        'site:bhglobal.com.sg/jobs "Electrical Intern"', 8, bypass_cache=True
+    )
+    args = captured["params"]["arguments"]
+    assert args["query"] == '"Electrical Intern"'
+    assert args["filters"] == {"domainFilter": {"include": ["bhglobal.com.sg"]}}
+    assert rows[0].url.endswith("/jobs/electrical-intern/")
 
 def test_agentcore_budget_can_disable_network_calls(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AWS_AGENTCORE_GATEWAY_URL", "https://gateway.example/mcp")

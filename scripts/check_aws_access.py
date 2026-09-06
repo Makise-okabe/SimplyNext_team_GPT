@@ -42,8 +42,8 @@ def main() -> None:
     print(f"  model   : {bedrock_model_id()}")
 
     try:
-        reply = build_bedrock_chat(max_tokens=32, timeout=30, max_retries=0).invoke(
-            "Reply with exactly: SimplyNext Bedrock ready"
+        reply = build_bedrock_chat(max_tokens=8, timeout=30, max_retries=0).invoke(
+            "Return only this token: READY"
         )
     except Exception as exc:
         raise SystemExit(f"Bedrock test failed: {exc}") from exc

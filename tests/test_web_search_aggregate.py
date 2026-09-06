@@ -38,3 +38,30 @@ def test_aggregated_search_keeps_later_provider_results(monkeypatch):
     assert concrete.url in urls
     assert web_search.BING_URL in calls
     assert web_search.BING_RSS_URL in calls
+
+
+def test_agentcore_cannot_monopolize_aggregated_results(monkeypatch):
+    monkeypatch.setenv("AWS_AGENTCORE_GATEWAY_URL", "https://gateway.example/mcp")
+    aws_rows = [
+        SearchResult(f"AWS {index}", f"https://noise.example/{index}", "Example Engineer")
+        for index in range(8)
+    ]
+    official = SearchResult(
+        "Electrical Intern",
+        "https://www.bhglobal.com.sg/jobs/electrical-intern/",
+        "BH Global Corporation job scope",
+    )
+    monkeypatch.setattr(web_search, "_search_aws_agentcore", lambda *args, **kwargs: aws_rows)
+
+    def fake_request(url, query, *, parser, max_results, headers):
+        return [official] if url == web_search.BING_URL else []
+
+    monkeypatch.setattr(web_search, "_request_search", fake_request)
+    rows = web_search_aggregate.search_public_web_aggregated(
+        '"BH Global Corporation Ltd" "Electrical Intern"',
+        max_results=4,
+        min_results=2,
+        strict_relevance=False,
+    )
+    assert rows[0] == official
+    assert len([row for row in rows if "noise.example" in row.url]) <= 2

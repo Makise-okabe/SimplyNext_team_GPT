@@ -4,6 +4,7 @@ from career_agent.tools import web_search
 from career_agent.tools.web_search import SearchResult
 
 PROVIDER_RESULT_CAP = 6
+AGENTCORE_RESULT_CAP = 2
 MAX_QUERY_VARIANTS = 2
 
 
@@ -83,24 +84,8 @@ def search_public_web_aggregated(
     seen: set[str] = set()
     provider_cap = max(1, min(PROVIDER_RESULT_CAP, max_results))
 
-    # AWS AgentCore is the stable search provider. Keep its share bounded so
-    # independent public providers can still contribute a missed official page.
-    if web_search._agentcore_gateway_url():
-        for variant in variants:
-            try:
-                raw = web_search._search_aws_agentcore(variant, provider_cap)
-            except Exception:
-                raw = []
-            _merge_results(
-                collected,
-                seen,
-                raw,
-                original_query=query,
-                constraint=constraint,
-                strict_relevance=strict_relevance,
-                provider_cap=provider_cap,
-            )
-
+    # Public indexes currently have better recall for small Singapore employer
+    # pages. Collect them first so AgentCore cannot fill the result window.
     primary_providers = (
         (web_search.BING_URL, web_search._parse_bing_results),
         (web_search.BING_RSS_URL, web_search._parse_bing_rss),
@@ -126,6 +111,23 @@ def search_public_web_aggregated(
                 strict_relevance=strict_relevance,
                 provider_cap=provider_cap,
             )
+
+    # One AWS call and at most two AWS candidates per logical query. This also
+    # spreads the configured run budget across the whole Top 15 shortlist.
+    if web_search._agentcore_gateway_url():
+        try:
+            raw = web_search._search_aws_agentcore(variants[0], AGENTCORE_RESULT_CAP)
+        except Exception:
+            raw = []
+        _merge_results(
+            collected,
+            seen,
+            raw,
+            original_query=query,
+            constraint=constraint,
+            strict_relevance=strict_relevance,
+            provider_cap=AGENTCORE_RESULT_CAP,
+        )
 
     # Do not let a full candidate pool from AgentCore/Bing prevent DuckDuckGo from
     # contributing when broad recall is requested. In strict mode, however, the

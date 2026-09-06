@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import httpx
 
-from career_agent.tools.web_fetch import _ats_posting
+from career_agent.tools.web_fetch import _ats_posting, _dynamic_career_links
 
 
 MCF_URL = (
@@ -16,7 +16,7 @@ class FakeClient:
         self.response = response
         self.urls: list[str] = []
 
-    def get(self, url: str):
+    def get(self, url: str, **kwargs):
         self.urls.append(url)
         return self.response
 
@@ -57,3 +57,62 @@ def test_mcf_missing_detail_is_marked_closed() -> None:
 
     assert posting["validThrough"] == "1970-01-01"
     assert "no longer available" in posting["description"]
+
+
+def test_lenovo_board_exposes_active_dynamic_detail_links() -> None:
+    endpoint = (
+        "https://talent.lenovo.com.cn/gateway/jobBase/list?"
+        "currentPage=1&pageSize=100&projectType=3"
+    )
+    response = httpx.Response(
+        200,
+        json={"code": 0, "result": {"rows": [{
+            "id": 2399,
+            "jobName": "AI Solution Architect",
+            "typeName": "Global Future Leaders",
+            "firstDeptId": "SSG",
+            "publishFlag": 1,
+            "activateFlag": 1,
+        }]}},
+        request=httpx.Request("GET", endpoint),
+    )
+    client = FakeClient(response)
+
+    links, labels = _dynamic_career_links(
+        client,
+        "https://talent.lenovo.com.cn/position?projectType=3",
+    )
+
+    detail = "https://talent.lenovo.com.cn/position/detail?id=2399"
+    assert client.urls == [endpoint]
+    assert links == (detail,)
+    assert labels == ((detail, "AI Solution Architect Global Future Leaders SSG"),)
+
+
+def test_lenovo_dynamic_detail_uses_official_job_api() -> None:
+    endpoint = "https://talent.lenovo.com.cn/gateway/jobBase/list?jobId=2399"
+    response = httpx.Response(
+        200,
+        json={"code": 0, "result": {"rows": [{
+            "id": 2399,
+            "jobName": "AI Solution Architect",
+            "jobDuties": "<p>Develop and deploy RAG and LLM applications.</p>",
+            "jobRequirement": "<p>Python, PyTorch or TensorFlow, Linux and Git.</p>",
+            "workPlace": "Beijing",
+            "publishFlag": 1,
+            "activateFlag": 1,
+        }]}},
+        request=httpx.Request("GET", endpoint),
+    )
+    client = FakeClient(response)
+
+    posting = _ats_posting(
+        client,
+        "https://talent.lenovo.com.cn/position/detail?id=2399",
+    )
+
+    assert client.urls == [endpoint]
+    assert posting["title"] == "AI Solution Architect"
+    assert posting["hiringOrganization"]["name"] == "Lenovo"
+    assert "RAG and LLM" in posting["description"]
+    assert posting["validThrough"] is None

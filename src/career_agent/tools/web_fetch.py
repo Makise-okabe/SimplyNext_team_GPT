@@ -4,7 +4,7 @@ import ipaddress
 import json
 import re
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlparse, quote
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, quote
 
 import httpx
 from bs4 import BeautifulSoup
@@ -89,6 +89,34 @@ def _ats_posting(client, url: str) -> dict | None:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     parts = [p for p in parsed.path.split("/") if p]
+    if host == "talent.lenovo.com.cn" and parsed.path.rstrip("/") == "/position/detail":
+        job_id = (parse_qs(parsed.query).get("id") or [""])[0]
+        if not job_id.isdigit():
+            return None
+        endpoint = "https://talent.lenovo.com.cn/gateway/jobBase/list?" + urlencode({"jobId": job_id})
+        response = client.get(endpoint, headers={"Accept": "application/json", "portal-type": "PC"})
+        response.raise_for_status()
+        rows = ((response.json().get("result") or {}).get("rows") or [])
+        info = rows[0] if rows and isinstance(rows[0], dict) else {}
+        if not info.get("jobName"):
+            return None
+        active = bool(info.get("publishFlag")) and bool(info.get("activateFlag"))
+        description = (
+            "<h2>Responsibilities</h2>" + str(info.get("jobDuties") or "")
+            + "<h2>Requirements</h2>" + str(info.get("jobRequirement") or "")
+        )
+        if not active:
+            description += "<p>This job is no longer available.</p>"
+        return {
+            "@type": "JobPosting",
+            "title": info["jobName"],
+            "description": description,
+            "hiringOrganization": {"name": "Lenovo"},
+            "identifier": str(info.get("id") or job_id),
+            "jobLocation": info.get("workPlace") or "China",
+            "validThrough": None if active else "1970-01-01",
+            "url": url,
+        }
     if host in {"mycareersfuture.gov.sg", "www.mycareersfuture.gov.sg"} and "job" in parts:
         match = re.search(r"([0-9a-f]{32})$", parsed.path.rstrip("/"), re.I)
         if not match:
@@ -172,6 +200,40 @@ def _ats_posting(client, url: str) -> dict | None:
     return None
 
 
+def _dynamic_career_links(client, url: str) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Expose job-detail routes hidden behind supported client-rendered boards."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host != "talent.lenovo.com.cn" or parsed.path.rstrip("/") != "/position":
+        return (), ()
+    source_query = parse_qs(parsed.query)
+    params = {"currentPage": "1", "pageSize": "100"}
+    for key in ("projectType", "aiJobFlag", "jobTypeName", "workPlace", "deptId", "keyword"):
+        value = (source_query.get(key) or [""])[0]
+        if value:
+            params[key] = value
+    endpoint = "https://talent.lenovo.com.cn/gateway/jobBase/list?" + urlencode(params)
+    response = client.get(endpoint, headers={"Accept": "application/json", "portal-type": "PC"})
+    response.raise_for_status()
+    rows = ((response.json().get("result") or {}).get("rows") or [])
+    links: list[str] = []
+    labels: list[tuple[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not str(row.get("id") or "").isdigit():
+            continue
+        if not row.get("publishFlag") or not row.get("activateFlag"):
+            continue
+        detail = f"https://talent.lenovo.com.cn/position/detail?id={row['id']}"
+        links.append(detail)
+        label = " ".join(filter(None, (
+            str(row.get("jobName") or ""),
+            str(row.get("typeName") or ""),
+            str(row.get("firstDeptId") or ""),
+        )))
+        labels.append((detail, label))
+    return tuple(dict.fromkeys(links)), tuple(labels)
+
+
 def fetch_public_page(url: str, timeout_seconds: float = 12.0) -> FetchedPage:
     if not public_http_url(url):
         raise ValueError("Expected a public HTTP(S) URL")
@@ -192,6 +254,17 @@ def fetch_public_page(url: str, timeout_seconds: float = 12.0) -> FetchedPage:
         if "html" not in content_type:
             return FetchedPage(url, final_url, response.status_code, "", "")
         page = parse_html_page(url, final_url, response.status_code, response.text)
+        try:
+            dynamic_links, dynamic_labels = _dynamic_career_links(client, final_url)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            dynamic_links, dynamic_labels = (), ()
+        if dynamic_links:
+            page = FetchedPage(**{
+                **page.__dict__,
+                "links": tuple(dict.fromkeys((*page.links, *dynamic_links))),
+                "link_labels": tuple((*page.link_labels, *dynamic_labels)),
+                "extraction_method": "public_career_api",
+            })
         if not page.job_postings:
             try:
                 posting = _ats_posting(client, final_url)

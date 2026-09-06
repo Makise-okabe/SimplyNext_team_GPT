@@ -152,6 +152,8 @@ def _looks_job_like(url: str) -> bool:
         return False
     if any(parse_qs(parsed.query).get(key) for key in ("jobId", "jobid", "job_id", "jobCode", "jobcode", "reqid", "gh_jid")):
         return True
+    if path == "/position/detail" and parse_qs(parsed.query).get("id"):
+        return True
     if (parsed.hostname or "").endswith(".lever.co"):
         return len([p for p in path.split("/") if p]) >= 2
     return bool(re.search(

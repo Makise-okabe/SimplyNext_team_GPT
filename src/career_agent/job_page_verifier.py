@@ -34,6 +34,14 @@ def _plain(value) -> str:
 def clean_search_title(title: str) -> str:
     # Remove recruiting dates, keeping meaningful qualifiers such as RF or FPGA.
     value = re.sub(r"\([^)]*(?:20\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b)[^)]*\)", " ", title, flags=re.I)
+    if ":" in value:
+        prefix, role = value.rsplit(":", 1)
+        programme_markers = (
+            "programme", "program", "future leaders", "graduate", "campus recruitment",
+            "campus hiring", "early careers", "management associate",
+        )
+        if role.strip() and any(marker in prefix.lower() for marker in programme_markers):
+            value = role
     return " ".join(value.split())
 
 

@@ -221,6 +221,23 @@ def test_agentcore_results_are_combined_with_public_results(monkeypatch) -> None
     assert web_search.search_public_web('"Reolink" "AI Engineer" careers job') == [official, public]
 
 
+def test_official_role_result_survives_when_title_omits_company(monkeypatch) -> None:
+    monkeypatch.delenv("AWS_AGENTCORE_GATEWAY_URL", raising=False)
+    official = SearchResult(
+        title="Electrical Intern",
+        url="https://www.bhglobal.com.sg/jobs/electrical-intern/",
+        snippet="Job Scope: Assist in the design and development of electrical systems",
+    )
+    monkeypatch.setattr(web_search, "_request_search", lambda *args, **kwargs: [official])
+
+    results = web_search.search_public_web(
+        '"BH Global Corporation Ltd" "Electrical Intern" official',
+        max_results=8,
+    )
+
+    assert results == [official]
+
+
 def test_agentcore_parser_reads_sse_json_rpc_payload() -> None:
     payload = {
         "jsonrpc": "2.0",

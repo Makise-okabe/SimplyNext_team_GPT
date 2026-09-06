@@ -49,7 +49,7 @@ def test_resolver_keeps_true_exact_secondary_page(monkeypatch):
     assert result.kind == "secondary_exact"
     assert resolved.secondary_source_url == result.url
     assert len(calls) == 3  # A secondary hit must not stop official discovery.
-    assert calls[0][0] == '"Reolink" "AI Engineer" careers job'
+    assert calls[0][0] == '"Reolink" "AI Engineer"'
 
 
 def test_resolver_retains_matching_candidate_when_page_blocks_automation(monkeypatch):
@@ -195,3 +195,43 @@ def test_resolver_rejects_probable_secondary_instead_of_guessing(monkeypatch):
     assert result.url is None
     assert result.kind == "unresolved"
     assert resolved.search_resolution_status == "unresolved"
+
+
+def test_closed_exact_linkedin_is_kept_as_archived_evidence(monkeypatch):
+    url = "https://sg.linkedin.com/jobs/view/embedded-software-engineer-at-goldilock-secure-4378805035"
+    monkeypatch.setattr(
+        job_link_resolver,
+        "search_public_web",
+        lambda query, **kwargs: [
+            SearchResult(
+                title="Embedded Software Engineer - Goldilock Secure",
+                url=url,
+                snippet="No longer accepting applications",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        job_link_resolver,
+        "fetch_public_page",
+        lambda url, **kwargs: FetchedPage(
+            url,
+            url,
+            200,
+            "Embedded Software Engineer - Goldilock Secure",
+            "Embedded Software Engineer\nGoldilock Secure\n"
+            "No longer accepting applications\nResponsibilities\n"
+            + "Develop embedded C and C++ systems. " * 20
+            + "\nRequirements\nEmbedded engineering experience.",
+        ),
+    )
+
+    resolved, result = resolve_job_link(
+        _job("Goldilock", "Embedded Software Engineer (Aug - Nov/Dec 2026)")
+    )
+
+    assert result.url is None
+    assert resolved.job_page_url is None
+    assert resolved.candidate_job_url == url
+    assert resolved.candidate_job_kind == "secondary_archived"
+    assert resolved.jd_status == "fetched_secondary"
+    assert "embedded C and C++" in resolved.jd_text

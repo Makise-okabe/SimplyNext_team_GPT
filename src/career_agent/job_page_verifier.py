@@ -69,7 +69,25 @@ def _location(value) -> str:
 
 
 def _section(text: str, labels: tuple[str, ...]) -> list[str]:
-    headers = {"responsibilities", "key responsibilities", "requirements", "qualifications", "minimum qualifications", "preferred qualifications", "required skills", "preferred skills", "benefits", "about us", "job description"}
+    headers = {
+        "responsibilities",
+        "key responsibilities",
+        "job scope",
+        "duties",
+        "requirements",
+        "job requirement",
+        "job requirements",
+        "qualifications",
+        "minimum qualifications",
+        "preferred qualifications",
+        "required skills",
+        "preferred skills",
+        "learning outcomes",
+        "benefits",
+        "how to apply",
+        "about us",
+        "job description",
+    }
     lines, active, result = text.splitlines(), False, []
     for line in lines:
         normalized = line.strip().rstrip(":").lower()
@@ -127,8 +145,6 @@ def verify_job_page(job: JobRecord, page: FetchedPage) -> PageVerification:
     if job.location and "singapore" in job.location.lower() and location and "singapore" not in location.lower() and location.lower() != "sg":
         return PageVerification("wrong_location", f"Posting location differs from the email: {location}")
     description = _plain(posting.get("description")) if posting else page.text
-    if _expired(posting.get("validThrough")) or page_is_closed(description) or page_is_closed(page.text[:3000]):
-        return PageVerification("closed", "The matching posting is closed or its validity date has passed", details={"official": official})
     # Require independent readable job information; a descriptive URL is not evidence.
     if len(description.strip()) < 100:
         return PageVerification("insufficient_evidence", "Page identity matches but readable job information is insufficient")
@@ -143,8 +159,8 @@ def verify_job_page(job: JobRecord, page: FetchedPage) -> PageVerification:
         "jd_source_url": url if full or partial else job.jd_source_url,
         "job_id": identifier or job.job_id,
         "location": location or job.location,
-        "responsibilities": [_plain(posting["responsibilities"])] if posting.get("responsibilities") else _section(jd, ("responsibilities", "key responsibilities")),
-        "required_skills": [_plain(posting["skills"])] if posting.get("skills") else _section(jd, ("required skills", "requirements")),
+        "responsibilities": [_plain(posting["responsibilities"])] if posting.get("responsibilities") else _section(jd, ("responsibilities", "key responsibilities", "job scope", "duties")),
+        "required_skills": [_plain(posting["skills"])] if posting.get("skills") else _section(jd, ("required skills", "requirements", "job requirement", "job requirements")),
         "preferred_skills": _section(jd, ("preferred skills", "preferred qualifications")),
         "qualifications": [_plain(posting["qualifications"])] if posting.get("qualifications") else _section(jd, ("qualifications", "minimum qualifications")),
     }
@@ -153,6 +169,15 @@ def verify_job_page(job: JobRecord, page: FetchedPage) -> PageVerification:
         details["opportunity_type"] = "internship"
     elif "full" in employment and job.opportunity_type == "unknown":
         details["opportunity_type"] = "full_time"
+    if _expired(posting.get("validThrough")) or page_is_closed(description) or page_is_closed(page.text[:3000]):
+        return PageVerification(
+            "closed",
+            "The matching posting is closed or its validity date has passed",
+            url,
+            f"{basis}_exact",
+            "high" if official else "medium",
+            {**details, "official": official},
+        )
     return PageVerification("verified", f"Fetched role and employer match ({page.extraction_method})", url, f"{basis}_exact", "high" if official else "medium", details)
 
 
@@ -169,6 +194,22 @@ def apply_page_verification(job: JobRecord, check: PageVerification) -> JobRecor
     base = clear_unverified_links(job)
     update = {"link_verification_status": check.status, "link_verification_reason": check.reason, "link_checked_at": datetime.now(timezone.utc).isoformat()}
     if check.status != "verified":
+        # A closed exact page is not an application destination, but its JD is
+        # still valid evidence for explaining the role and the student's fit.
+        for field in (
+            "jd_text",
+            "jd_status",
+            "jd_source_url",
+            "job_id",
+            "location",
+            "opportunity_type",
+            "responsibilities",
+            "required_skills",
+            "preferred_skills",
+            "qualifications",
+        ):
+            if field in check.details:
+                update[field] = check.details[field]
         if check.status == "closed" and check.details.get("official"):
             update["availability_status"] = "closed_by_official"
         return base.model_copy(update=update)

@@ -90,6 +90,60 @@ def test_official_homepage_is_navigation_seed_not_job_button(monkeypatch):
     assert resolved.job_page_url != homepage
 
 
+def test_bh_search_result_without_company_in_title_yields_full_official_jd(monkeypatch):
+    official = "https://www.bhglobal.com.sg/jobs/electrical-intern/"
+    target = JobRecord(
+        source_message_id="test",
+        source_subject="Career opportunities",
+        company="BH Global Corporation Ltd",
+        title="Electrical Intern",
+        opportunity_type="internship",
+    )
+    html = (
+        "<title>Electrical Intern - BH Global</title><h1>Electrical Intern</h1>"
+        "<p>Job Category: Engineering</p><p>Job Type: Internship</p>"
+        "<h2>Job Scope:</h2><ul>"
+        + "".join(
+            f"<li>{item}</li>"
+            for item in [
+                "Assist in the design and development of electrical systems for electric and hybrid propulsion technologies, including motor controllers, inverters, and power distribution units.",
+                "Facilitate wiring and troubleshooting of electrical panels used in marine electrification technologies.",
+                "Support integration and testing of electrical components, control systems, and battery management systems.",
+                "Assist with factory acceptance testing of electric and hybrid propulsion systems on test benches.",
+            ]
+        )
+        + "</ul><h2>Job requirement:</h2><p>Electrical engineering student with hands-on laboratory experience.</p>"
+        "<h2>Learning Outcomes:</h2><p>Hands-on experience with maritime electrification projects.</p>"
+    )
+    monkeypatch.setattr(
+        resolver,
+        "search_public_web",
+        lambda *args, **kwargs: [
+            SearchResult(
+                "Electrical Intern",
+                official,
+                "Job Scope: Assist in the design and development of electrical systems",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        resolver,
+        "fetch_public_page",
+        lambda url, **kwargs: parse_html_page(url, url, 200, html),
+    )
+
+    resolved, result = resolver.resolve_job_link(target)
+
+    assert result.url == official
+    assert result.kind == "official_exact"
+    assert resolved.job_page_url == official
+    assert resolved.jd_source_url == official
+    assert resolved.jd_status == "fetched_official"
+    assert any("design and development" in item for item in resolved.responsibilities)
+    assert not any("Electrical engineering student" in item for item in resolved.responsibilities)
+    assert any("Electrical engineering student" in item for item in resolved.required_skills)
+
+
 def test_known_wrong_role_is_not_retained_as_candidate(monkeypatch):
     url = "https://reolink.com/jobs/123"
     monkeypatch.setattr(resolver, "search_public_web", lambda *a, **kw: [SearchResult("AI Engineer - Reolink", url, "")])
@@ -104,5 +158,4 @@ def test_ranking_cannot_inject_official_candidate_or_google_button():
     card["company_careers_url"] = "https://reolink.com/careers"
     card["search_fallback_url"] = "https://www.google.com/search?q=Reolink"
     links = actionable_job_links(card)
-    assert len(links) == 1
-    assert links[0][0] == "Search LinkedIn ↗"
+    assert links == []

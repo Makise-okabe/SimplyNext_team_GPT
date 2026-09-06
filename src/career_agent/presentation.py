@@ -1,7 +1,5 @@
-"""Build result cards with verified pages and useful human-checkable fallbacks."""
-from urllib.parse import quote_plus
+"""Build result cards from exact role-page evidence only."""
 
-from career_agent.job_page_verifier import clean_search_title
 from career_agent.tools.web_fetch import public_http_url
 
 LINK_FIELDS = ("job_page_url", "official_job_url", "application_url", "primary_source_url", "secondary_source_url")
@@ -20,7 +18,7 @@ def verified_job_url(card: dict) -> str | None:
 
 
 def actionable_job_links(card: dict) -> list[tuple[str, str]]:
-    """Return exact employer page first, then LinkedIn/secondary discovery."""
+    """Return direct role pages only; never manufacture a search-results URL."""
     links: list[tuple[str, str]] = []
     verified = verified_job_url(card)
     if verified:
@@ -47,16 +45,20 @@ def actionable_job_links(card: dict) -> list[tuple[str, str]]:
     if not verified:
         candidate = str(card.get("candidate_job_url") or "")
         if public_http_url(candidate):
-            label = "Check possible role page ↗" if card.get("candidate_job_kind") == "official_candidate" else "Check secondary listing ↗"
+            kind = str(card.get("candidate_job_kind") or "")
+            if kind == "official_archived":
+                label = "Open archived official JD ↗"
+            elif kind == "secondary_archived" and "linkedin.com" in candidate.lower():
+                label = "Open archived LinkedIn JD ↗"
+            elif kind == "secondary_archived":
+                label = "Open archived secondary JD ↗"
+            elif kind == "official_candidate":
+                label = "Check possible official role ↗"
+            elif "linkedin.com" in candidate.lower():
+                label = "Check possible LinkedIn role ↗"
+            else:
+                label = "Check possible secondary role ↗"
             links.append((label, candidate))
-
-    company = str(card.get("company") or "").strip()
-    title = clean_search_title(str(card.get("title") or "").strip())
-    location = str(card.get("location") or "Singapore").strip()
-    has_linkedin = any("linkedin.com" in url.lower() for _, url in links)
-    if company and title and not has_linkedin:
-        linkedin_url = "https://www.linkedin.com/jobs/search/?" + f"keywords={quote_plus(company + ' ' + title)}&location={quote_plus(location)}"
-        links.append(("Search LinkedIn ↗", linkedin_url))
 
     deduplicated: list[tuple[str, str]] = []
     seen: set[str] = set()

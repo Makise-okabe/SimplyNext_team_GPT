@@ -82,6 +82,7 @@ JD_SIGNAL_GROUPS = (
     ),
     (
         "requirements",
+        "job requirement",
         "job requirements",
         "qualifications",
         "minimum qualifications",
@@ -93,6 +94,7 @@ JD_SIGNAL_GROUPS = (
     ),
     (
         "job description",
+        "job scope",
         "about the role",
         "about this role",
         "position summary",

@@ -39,6 +39,7 @@ Related Job Discovery
 - **Job-page resolution is separate from JD extraction.** A useful LinkedIn/ATS/company job link is kept even when the page is dynamic or cannot yield a full JD.
 - **Evidence is graded, not binary.** `full_jd`, `partial_jd`, and `source_only` are all valid matching inputs with different confidence.
 - **Official sources are preferred, not mandatory.** Secondary pages may provide a clickable exact role or JD while provenance stays explicit.
+- **No generated search buttons.** The results page shows only a concrete role URL returned by search and checked against the company/title; it never fabricates a Google or LinkedIn search page.
 - **No auto-apply.** The student remains the decision-maker.
 
 ## Main runner

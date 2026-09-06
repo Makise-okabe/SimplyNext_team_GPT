@@ -143,10 +143,13 @@ def _looks_job_like(url: str) -> bool:
 
 def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str] | None:
     identity = f"{result.title} {result.url}"
-    if not _resolver_company_match(job.company, identity):
+    official = is_plausible_official_url(result.url, job.company)
+    # Search engines often title an employer result with only the role name.
+    # A company-safe official host is stronger identity evidence than requiring
+    # the company words to be repeated in the visible result title.
+    if not official and not _resolver_company_match(job.company, identity):
         return None
 
-    official = is_plausible_official_url(result.url, job.company)
     overlap = _resolver_title_overlap(job.title, identity)
     concrete = _looks_job_like(result.url)
 
@@ -177,7 +180,9 @@ def _score_result(job: JobRecord, result: SearchResult) -> tuple[float, str, str
 
 
 def _query(company: str, title: str) -> str:
-    return f'"{company}" "{clean_search_title(title)}" careers job'
+    # Match the concise query a person would type into a search engine. Extra
+    # "careers job" terms can bury small-company role pages below brand noise.
+    return f'"{company}" "{clean_search_title(title)}"'
 
 
 def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
@@ -197,13 +202,22 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
     rejected_urls: set[str] = set()
     best_careers_url = job.company_careers_url
     closed = None
+    archived = None
     query_used = None
 
-    def remember_candidate(url: str, *, score: float, reason: str) -> None:
+    def remember_candidate(
+        url: str,
+        *,
+        score: float,
+        reason: str,
+        kind_override: str | None = None,
+    ) -> None:
         nonlocal best_candidate
         if not public_http_url(url) or url in rejected_urls:
             return
-        if is_plausible_official_url(url, company):
+        if kind_override:
+            kind = kind_override
+        elif is_plausible_official_url(url, company):
             kind = "official_candidate"
             score += 100.0
         elif is_secondary_url(url):
@@ -211,7 +225,11 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         else:
             return
         candidate = (score, url, kind, reason)
-        if best_candidate is None or candidate[0] > best_candidate[0]:
+        if (
+            best_candidate is None
+            or candidate[0] > best_candidate[0]
+            or (kind_override and best_candidate[1] == url)
+        ):
             best_candidate = candidate
 
     def unresolved_fields() -> dict:
@@ -234,7 +252,7 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
         return update
 
     def check(url, query):
-        nonlocal fetched, closed, best_secondary, best_careers_url, best_candidate
+        nonlocal fetched, closed, archived, best_secondary, best_careers_url, best_candidate
         if not public_http_url(url) or url in tried or fetched >= 6:
             return None
         tried.add(url)
@@ -245,7 +263,15 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
             attempts.append({"url": url, "status": "unavailable", "reason": type(exc).__name__, "query": query})
             return None
         verification = verify_job_page(job, page)
-        if verification.status not in {"verified", "unavailable", "blocked"}:
+        if verification.status == "closed":
+            official = bool(verification.details.get("official"))
+            remember_candidate(
+                page.final_url,
+                score=180.0,
+                reason="Exact role page found, but the listing is closed",
+                kind_override="official_archived" if official else "secondary_archived",
+            )
+        elif verification.status not in {"verified", "unavailable", "blocked"}:
             rejected_urls.add(url)
             if best_candidate and best_candidate[1] == url:
                 best_candidate = None
@@ -261,8 +287,12 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
                     })
                 return resolved
             best_secondary = best_secondary or resolved
-        elif verification.status == "closed" and verification.details.get("official"):
-            closed = apply_page_verification(base, verification)
+        elif verification.status == "closed":
+            checked_closed = apply_page_verification(base, verification)
+            if verification.details.get("official"):
+                closed = checked_closed
+            else:
+                archived = archived or checked_closed
         # Official career pages are discovery seeds, never application buttons.
         if verification.status == "generic_page" and is_plausible_official_url(page.final_url, company):
             best_careers_url = best_careers_url or page.final_url
@@ -302,9 +332,13 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
             return finish(closed)
 
     cleaned = clean_search_title(title)
-    queries = [_query(company, title), f'"{company}" {cleaned} careers Singapore', f'"{company}" {cleaned} job']
+    queries = [
+        _query(company, title),
+        f'"{company}" "{cleaned}" official',
+        f'site:linkedin.com/jobs/view "{company}" "{cleaned}"',
+    ]
     if job.location and "singapore" not in job.location.lower():
-        queries[1] = f'"{company}" {cleaned} careers {job.location}'
+        queries[1] = f'"{company}" "{cleaned}" official {job.location}'
     official_hosts = list(dict.fromkeys(urlparse(u).hostname for u in existing if is_plausible_official_url(u, company)))
     if official_hosts:
         queries[1] = f'site:{official_hosts[0]} {cleaned}'
@@ -341,6 +375,8 @@ def resolve_job_link(job: JobRecord) -> tuple[JobRecord, LinkResolution]:
             break
     if best_secondary:
         return finish(best_secondary)
+    if archived:
+        return finish(archived)
     from datetime import datetime, timezone
     unresolved = base.model_copy(update={
         **unresolved_fields(),

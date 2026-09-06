@@ -375,10 +375,15 @@ def _render_job_cta(card: dict) -> None:
         from urllib.parse import urlparse
         st.caption(urlparse(links[0][1]).hostname or "")
         if not verified_job_url(card):
-            st.caption("Official role page not verified. A specific LinkedIn job page may be shown as secondary evidence.")
+            if str(card.get("candidate_job_kind") or "").endswith("_archived"):
+                st.caption("Exact role page found, but the listing is closed. It is shown only as JD evidence.")
+            else:
+                st.caption("This direct role result could not be fully verified; check it before applying.")
+        elif card.get("job_page_kind") == "secondary_exact":
+            st.caption("Verified secondary role page; no matching employer page was found.")
         return
 
-    st.markdown("<div class='sn-unavailable'>No searchable company or role name</div>", unsafe_allow_html=True)
+    st.markdown("<div class='sn-unavailable'>No exact role page found</div>", unsafe_allow_html=True)
 
 
 def _evidence_label(card: dict) -> str:

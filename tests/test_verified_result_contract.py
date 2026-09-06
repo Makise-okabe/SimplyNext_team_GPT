@@ -38,8 +38,7 @@ def test_structured_jd_survives_script_removal_and_export():
     assert card['jd_source_url'] == URL
     assert 'Python' in card['jd_text']
     links = actionable_job_links(card)
-    assert links[0] == ("Open official job ↗", URL)
-    assert links[1][0] == "Search LinkedIn ↗"
+    assert links == [("Open official job ↗", URL)]
 
 
 @pytest.mark.parametrize('changes,status', [
@@ -65,15 +64,12 @@ def test_old_alias_cannot_restore_unverified_button():
     assert card['application_url'] is None
 
 
-def test_every_named_opportunity_has_clickable_search_fallbacks():
+def test_unresolved_opportunity_does_not_invent_search_page_link():
     card = job_card(job().model_dump(), {})
-    links = actionable_job_links(card)
-    assert links[0][0] == "Search LinkedIn ↗"
-    assert links[0][1].startswith("https://www.linkedin.com/jobs/search/?")
-    assert not any("google.com" in url for _, url in links)
+    assert actionable_job_links(card) == []
 
 
-def test_likely_official_candidate_is_shown_before_search_fallback():
+def test_likely_official_candidate_is_shown_as_direct_candidate():
     candidate = "https://careers.amd.com/jobs/98765"
     card = job_card(job(
         candidate_job_url=candidate,
@@ -81,7 +77,7 @@ def test_likely_official_candidate_is_shown_before_search_fallback():
         candidate_job_reason="Search result matches company and title",
     ).model_dump(), {})
     links = actionable_job_links(card)
-    assert links[0] == ("Check possible role page ↗", candidate)
+    assert links == [("Check possible official role ↗", candidate)]
     assert verified_job_url(card) is None
 
 

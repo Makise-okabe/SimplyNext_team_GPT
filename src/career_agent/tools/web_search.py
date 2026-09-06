@@ -17,6 +17,8 @@ import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
+from career_agent.job_research_quality import is_plausible_official_url
+
 load_dotenv()
 
 
@@ -171,7 +173,11 @@ def _result_matches_quoted_query(result: SearchResult, query: str) -> bool:
     company_tokens = _query_tokens(parts[0])
     title_tokens = _query_tokens(parts[1])
 
-    company_match = not company_tokens or bool(company_tokens & text_tokens)
+    company_match = (
+        not company_tokens
+        or bool(company_tokens & text_tokens)
+        or is_plausible_official_url(result.url, parts[0])
+    )
     if not company_match:
         compact_company = "".join(sorted(company_tokens))
         compact_text = re.sub(r"[^a-z0-9]", "", text)
